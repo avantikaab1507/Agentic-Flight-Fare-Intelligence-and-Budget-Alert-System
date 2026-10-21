@@ -1,0 +1,1807 @@
+﻿{
+    "name":  "Agentic Flight Fare Intelligence \u0026 Budget Alert System",
+    "nodes":  [
+                  {
+                      "parameters":  {
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "9f3aa4d4-fcf0-434c-85a4-af00a247530b",
+                      "name":  "When chat message received",
+                      "type":  "@n8n/n8n-nodes-langchain.chatTrigger",
+                      "typeVersion":  1.5,
+                      "position":  [
+                                       -4832,
+                                       160
+                                   ],
+                      "webhookId":  "4f6ab475-b624-4511-beb8-6585ad261cfd"
+                  },
+                  {
+                      "parameters":  {
+                                         "hasOutputParser":  true,
+                                         "options":  {
+                                                         "systemMessage":  "You are the Preference Agent for an Agentic Flight Fare Intelligence and Budget Alert System.\n\nYour job is to analyze the user\u0027s natural-language flight request and extract their travel preferences.\n\nExtract the following whenever provided:\n- origin\n- destination\n- departure date\n- return date\n- number of passengers\n- budget\n- currency\n- airline preference\n- cabin preference\n- flexibility\n\nDo not invent information that the user did not provide.\n\nNormalize airport/city names where possible. For example, Chennai can be represented as MAA and Delhi as DEL.\n\nReturn only the extracted travel requirements in a clear structured format.\n\nUse uppercase standardized values for categorical fields such as airline_preference and cabin_preference. Use \"ANY\" when the user has no airline preference."
+                                                     }
+                                     },
+                      "id":  "aa71f805-dbd8-4d14-a8b9-2c297d7c5685",
+                      "name":  "Preference Agent",
+                      "type":  "@n8n/n8n-nodes-langchain.agent",
+                      "typeVersion":  3.1,
+                      "position":  [
+                                       -4608,
+                                       160
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "0fc8aff7-d077-4d36-a798-09b8e68f841b",
+                      "name":  "Google Gemini Chat Model",
+                      "type":  "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+                      "typeVersion":  1.2,
+                      "position":  [
+                                       -4736,
+                                       368
+                                   ],
+                      "credentials":  {
+                                          "googlePalmApi":  {
+                                                                "id":  null,
+                                                                "name":  "",
+                                                                "__aiGatewayManaged":  true
+                                                            }
+                                      }
+                  },
+                  {
+                      "parameters":  {
+                                         "jsonSchemaExample":  "{\n  \"origin\": \"MAA\",\n  \"destination\": \"DEL\",\n  \"departure_date\": \"2026-11-15\",\n  \"return_date\": null,\n  \"passengers\": 1,\n  \"budget\": 8000,\n  \"currency\": \"INR\",\n  \"airline_preference\": \"ANY\",\n  \"cabin_preference\": null,\n  \"flexibility\": null\n}"
+                                     },
+                      "id":  "f5143049-9213-41e1-9803-242137b66c1d",
+                      "name":  "Structured Output Parser",
+                      "type":  "@n8n/n8n-nodes-langchain.outputParserStructured",
+                      "typeVersion":  1.3,
+                      "position":  [
+                                       -4432,
+                                       368
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "method":  "=POST",
+                                         "url":  "https://api.duffel.com/air/offer_requests",
+                                         "authentication":  "genericCredentialType",
+                                         "genericAuthType":  "httpBearerAuth",
+                                         "sendHeaders":  true,
+                                         "headerParameters":  {
+                                                                  "parameters":  [
+                                                                                     {
+                                                                                         "name":  "Duffel-Version",
+                                                                                         "value":  "v2"
+                                                                                     },
+                                                                                     {
+                                                                                         "name":  "Accept",
+                                                                                         "value":  "application/json"
+                                                                                     }
+                                                                                 ]
+                                                              },
+                                         "sendBody":  true,
+                                         "specifyBody":  "json",
+                                         "jsonBody":  "=\n{{ JSON.stringify({\n  data: {\n    slices: [\n      {\n        origin: $json.output.origin,\n        destination: $json.output.destination,\n        departure_date: $json.output.departure_date\n      }\n    ],\n    passengers: Array.from(\n      { length: Number($json.output.passengers) },\n      () =\u003e ({ type: \"adult\" })\n    ),\n    cabin_class: (\n      $json.output.cabin_preference || \"economy\"\n    ).toLowerCase()\n  }\n}) }}\n",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "6a65124d-e244-4ec2-92e2-05e14b8ffa88",
+                      "name":  "Duffel - Flight Offers Search",
+                      "type":  "n8n-nodes-base.httpRequest",
+                      "typeVersion":  4.5,
+                      "position":  [
+                                       -4240,
+                                       160
+                                   ],
+                      "credentials":  {
+                                          "httpBearerAuth":  {
+                                                                 "id":  "qK9dpFTrS0zeCHTM",
+                                                                 "name":  "Bearer Auth account"
+                                                             }
+                                      }
+                  },
+                  {
+                      "parameters":  {
+                                         "jsCode":  "// ======================================================\n// OFFER PROCESSOR \u0026 TEST DATA FILTER\n// ======================================================\n// Purpose:\n// 1. Extract useful flight-offer information from Duffel.\n// 2. Remove synthetic/test airlines.\n// 3. Distinguish marketing carrier from operating carrier.\n// 4. Use the operating carrier as the primary airline\n//    when Duffel provides it.\n// 5. Preserve all important flight information.\n// 6. Never invent missing information.\n//\n// IMPORTANT:\n// This node does NOT make booking decisions.\n// It only cleans and normalizes Duffel output.\n// ======================================================\n\nconst response = $input.all().map(i =\u003e i.json)[0] || {};\n\n// ------------------------------------------------------\n// Get offers safely\n// ------------------------------------------------------\n\nconst offers =\n  Array.isArray(response?.data?.offers)\n    ? response.data.offers\n    : [];\n\n// ------------------------------------------------------\n// Process each offer\n// ------------------------------------------------------\n\nconst processedOffers = [];\n\nfor (const offer of offers) {\n\n  // ----------------------------------------------------\n  // Basic offer information\n  // ----------------------------------------------------\n\n  const offerId =\n    offer?.id || null;\n\n  const offerOwnerName =\n    offer?.owner?.name || null;\n\n  const offerOwnerCode =\n    offer?.owner?.iata_code || null;\n\n  // ----------------------------------------------------\n  // Get first slice\n  // ----------------------------------------------------\n\n  const firstSlice =\n    Array.isArray(offer?.slices)\n      ? offer.slices[0]\n      : null;\n\n  // ----------------------------------------------------\n  // Get first segment\n  // ----------------------------------------------------\n\n  const firstSegment =\n    Array.isArray(firstSlice?.segments)\n      ? firstSlice.segments[0]\n      : null;\n\n  // ----------------------------------------------------\n  // Marketing carrier\n  // ----------------------------------------------------\n\n  const marketingCarrierName =\n    firstSegment?.marketing_carrier?.name ||\n    offerOwnerName ||\n    null;\n\n  const marketingCarrierCode =\n    firstSegment?.marketing_carrier?.iata_code ||\n    offerOwnerCode ||\n    null;\n\n  // ----------------------------------------------------\n  // Operating carrier\n  //\n  // Duffel may provide this separately from the\n  // marketing carrier.\n  // ----------------------------------------------------\n\n  const operatingCarrierName =\n    firstSegment?.operating_carrier?.name ||\n    null;\n\n  const operatingCarrierCode =\n    firstSegment?.operating_carrier?.iata_code ||\n    null;\n\n  // ----------------------------------------------------\n  // Determine the primary airline\n  //\n  // Prefer the actual operating carrier when available.\n  // Otherwise fall back to the marketing/owner carrier.\n  // ----------------------------------------------------\n\n  const primaryAirline =\n    operatingCarrierName ||\n    marketingCarrierName ||\n    null;\n\n  const primaryAirlineCode =\n    operatingCarrierCode ||\n    marketingCarrierCode ||\n    null;\n\n  // ----------------------------------------------------\n  // Synthetic/test airline filtering\n  //\n  // We check both the offer owner and the operating /\n  // marketing carriers so synthetic data is not allowed\n  // through accidentally.\n  // ----------------------------------------------------\n\n  const carrierNames = [\n    offerOwnerName,\n    marketingCarrierName,\n    operatingCarrierName\n  ]\n    .filter(Boolean)\n    .map(name =\u003e\n      String(name).trim().toLowerCase()\n    );\n\n  const carrierCodes = [\n    offerOwnerCode,\n    marketingCarrierCode,\n    operatingCarrierCode\n  ]\n    .filter(Boolean)\n    .map(code =\u003e\n      String(code).trim().toUpperCase()\n    );\n\n  const isSyntheticOffer =\n    carrierCodes.includes(\"ZZ\") ||\n    carrierNames.includes(\"duffel airways\");\n\n  if (isSyntheticOffer) {\n    continue;\n  }\n\n  // ----------------------------------------------------\n  // Origin and destination\n  // ----------------------------------------------------\n\n  const origin =\n    firstSlice?.origin?.iata_code ||\n    firstSegment?.origin?.iata_code ||\n    null;\n\n  const destination =\n    firstSlice?.destination?.iata_code ||\n    firstSegment?.destination?.iata_code ||\n    null;\n\n  // ----------------------------------------------------\n  // Flight timing\n  // ----------------------------------------------------\n\n  const departure =\n    firstSegment?.departing_at ||\n    null;\n\n  const arrival =\n    firstSegment?.arriving_at ||\n    null;\n\n  // ----------------------------------------------------\n  // Stops\n  // ----------------------------------------------------\n\n  const segments =\n    Array.isArray(firstSlice?.segments)\n      ? firstSlice.segments\n      : [];\n\n  const stops =\n    segments.length \u003e 0\n      ? Math.max(segments.length - 1, 0)\n      : null;\n\n  // ----------------------------------------------------\n  // Build normalized offer\n  // ----------------------------------------------------\n\n  processedOffers.push({\n    json: {\n\n      // ----------------------------------------------\n      // Basic offer identity\n      // ----------------------------------------------\n\n      offer_id:\n        offerId,\n\n      // ----------------------------------------------\n      // Primary airline used by downstream analysis\n      // ----------------------------------------------\n\n      airline:\n        primaryAirline,\n\n      airline_code:\n        primaryAirlineCode,\n\n      // ----------------------------------------------\n      // Carrier distinction\n      // ----------------------------------------------\n\n      marketing_airline:\n        marketingCarrierName,\n\n      marketing_airline_code:\n        marketingCarrierCode,\n\n      operating_airline:\n        operatingCarrierName,\n\n      operating_airline_code:\n        operatingCarrierCode,\n\n      // ----------------------------------------------\n      // Route\n      // ----------------------------------------------\n\n      origin:\n        origin,\n\n      destination:\n        destination,\n\n      // ----------------------------------------------\n      // Fare\n      // ----------------------------------------------\n\n      price:\n        offer?.total_amount != null\n          ? Number(offer.total_amount)\n          : null,\n\n      currency:\n        offer?.total_currency ||\n        null,\n\n      // ----------------------------------------------\n      // Timing\n      // ----------------------------------------------\n\n      departure:\n        departure,\n\n      arrival:\n        arrival,\n\n      // ----------------------------------------------\n      // Stops and duration\n      // ----------------------------------------------\n\n      stops:\n        stops,\n\n      duration:\n        firstSlice?.duration ||\n        null,\n\n      // ----------------------------------------------\n      // Cabin\n      // ----------------------------------------------\n\n      cabin:\n        firstSegment?.passengers?.[0]?.cabin_class ||\n        null,\n\n      // ----------------------------------------------\n      // Flight numbers\n      // ----------------------------------------------\n\n      marketing_flight_number:\n        firstSegment?.marketing_carrier_flight_number ||\n        null,\n\n      operating_flight_number:\n        firstSegment?.operating_carrier_flight_number ||\n        null\n    }\n  });\n}\n\n// ------------------------------------------------------\n// Return cleaned offers\n// ------------------------------------------------------\n\nreturn processedOffers;"
+                                     },
+                      "id":  "a5d143a7-50a7-435e-b4f9-11065e5350d5",
+                      "name":  "Offer Processor \u0026 Test Data Filter",
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       -4016,
+                                       160
+                                   ],
+                      "alwaysOutputData":  false
+                  },
+                  {
+                      "parameters":  {
+                                         "jsCode":  "const offers = $input.all().map(item =\u003e item.json);\n\nconst preferences = $(\u0027Preference Agent\u0027).first().json.output;\n\nreturn [\n  {\n    json: {\n      preferences,\n      offers\n    }\n  }\n];"
+                                     },
+                      "id":  "263e62fc-9a25-4507-8afc-bb7dbb759841",
+                      "name":  "Prepare Fare Intelligence Input",
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       -3792,
+                                       160
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "promptType":  "define",
+                                         "text":  "={{ JSON.stringify($json) }}",
+                                         "hasOutputParser":  true,
+                                         "options":  {
+                                                         "systemMessage":  "You are the Fare Intelligence Agent in an Agentic Flight Fare Intelligence and Budget Alert System.\n\nYour responsibility is to analyze cleaned flight-offer data in the context of the user\u0027s structured travel preferences.\n\nYou receive:\n1. Structured user travel preferences.\n2. A list of cleaned flight offers obtained from the flight-data provider.\n\nYour responsibilities are:\n\n1. Identify the cheapest available flight offer.\n2. Identify the cheapest suitable offer based on the user\u0027s stated preferences.\n3. Check whether the user\u0027s preferred airline is available.\n4. If a preferred airline is available, identify its cheapest suitable offer.\n5. Consider cabin preference when one is specified.\n6. Compare fares with the user\u0027s stated budget only when the fare currency and budget currency are the same.\n7. Calculate the budget difference when currencies are compatible.\n8. If the currencies differ, do not perform a direct numerical budget comparison. Report that currency conversion is required.\n9. Identify useful alternative flight options.\n10. Consider price, number of stops, duration, airline preference, and cabin preference when evaluating suitable alternatives.\n11. Identify meaningful fare observations from the available offers.\n12. Provide structured fare intelligence for the downstream Decision Agent.\n\nIMPORTANT RULES:\n\n- Never invent flight information, prices, airlines, dates, availability, or fare trends.\n- Use only the information provided in the input data.\n- Do not assume that an airline is available if it does not appear in the offers.\n- Do not recommend synthetic or test airlines.\n- Do not make a final booking decision. The Decision Agent is responsible for that.\n- Do not directly compare numerical values when the fare currency and budget currency are different.\n- Clearly distinguish factual observations from interpretation.\n- All calculations must be based on the provided offer data.\n- Prefer practical and relevant alternatives rather than returning a large number of repetitive offers.\n- Keep the output concise enough for downstream automation while retaining the important fare intelligence.\n\nThe system is intended to support personalized fare analysis, budget awareness, and future fare monitoring."
+                                                     }
+                                     },
+                      "id":  "237a16fa-ce21-4b45-a3cc-591447b22342",
+                      "name":  "Fare Intelligence Agent",
+                      "type":  "@n8n/n8n-nodes-langchain.agent",
+                      "typeVersion":  3.1,
+                      "position":  [
+                                       -3568,
+                                       160
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "modelName":  "models/gemini-2.5-flash",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "92e5b423-9732-4b7a-8a5c-4fa0ab8e9263",
+                      "name":  "Google Gemini Chat Model1",
+                      "type":  "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+                      "typeVersion":  1.2,
+                      "position":  [
+                                       -3696,
+                                       368
+                                   ],
+                      "credentials":  {
+                                          "googlePalmApi":  {
+                                                                "id":  null,
+                                                                "name":  "",
+                                                                "__aiGatewayManaged":  true
+                                                            }
+                                      }
+                  },
+                  {
+                      "parameters":  {
+                                         "schemaType":  "manual",
+                                         "inputSchema":  "{\n  \"cheapest_offer\": {\n    \"offer_id\": \"\",\n    \"airline\": \"\",\n    \"airline_code\": \"\",\n    \"price\": 0,\n    \"currency\": \"\",\n    \"stops\": 0,\n    \"duration\": \"\"\n  },\n  \"preferred_airline_available\": false,\n  \"preferred_airline_cheapest_offer\": {\n    \"offer_id\": null,\n    \"airline\": null,\n    \"airline_code\": null,\n    \"price\": null,\n    \"currency\": null,\n    \"stops\": null,\n    \"duration\": null\n  },\n  \"budget_status\": \"CURRENCY_MISMATCH\",\n  \"budget_difference\": null,\n  \"budget_currency\": \"\",\n  \"fare_currency\": \"\",\n  \"suitable_alternatives\": [],\n  \"fare_observations\": [],\n  \"analysis_summary\": \"\"\n}"
+                                     },
+                      "id":  "28f8f18d-3f8d-4dc6-a1d7-43497f0e6e0f",
+                      "name":  "Structured Output Parser1",
+                      "type":  "@n8n/n8n-nodes-langchain.outputParserStructured",
+                      "typeVersion":  1.3,
+                      "position":  [
+                                       -3392,
+                                       368
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "jsCode":  "\n // ======================================================\n // FARE STATISTICS \u0026 BUDGET ANALYSIS\n // ======================================================\n // Purpose:\n // 1. Preserve the Fare Intelligence output.\n // 2. Calculate fare statistics.\n // 3. Analyze budget compatibility.\n // 4. Preserve preferred-airline information.\n // 5. Preserve the cheapest suitable offer for downstream ML.\n //\n // IMPORTANT:\n // - No ML prediction happens here.\n // - No currency conversion happens here.\n // - Different currencies are NOT numerically compared.\n // ======================================================\n\n // ------------------------------------------------------\n // 1. Read Fare Intelligence output\n // ------------------------------------------------------\n\n const intelligence =\n   $input.first().json.output || $input.first().json;\n\n // Support the actual output structure from the\n // Fare Intelligence Agent.\n const fareData =\n   intelligence.fare_intelligence || intelligence;\n\n // ------------------------------------------------------\n // 2. Read user preferences\n // ------------------------------------------------------\n\n const preferences =\n   $(\u0027Preference Agent\u0027).first().json.output || {};\n\n // ------------------------------------------------------\n // 3. Extract important offers\n // ------------------------------------------------------\n\n const cheapestOffer =\n   fareData.cheapest_overall_offer ||\n   fareData.cheapest_offer ||\n   null;\n\n const cheapestSuitableOffer =\n   fareData.cheapest_suitable_offer || null;\n\n // ------------------------------------------------------\n // 4. Extract cheapest fare information\n // ------------------------------------------------------\n\n const cheapestFare =\n   cheapestOffer?.price != null\n     ? Number(cheapestOffer.price)\n     : null;\n\n const fareCurrency =\n   cheapestOffer?.currency || null;\n\n // ------------------------------------------------------\n // 5. Extract user budget\n // ------------------------------------------------------\n\n const userBudget =\n   preferences.budget != null\n     ? Number(preferences.budget)\n     : null;\n\n const budgetCurrency =\n   preferences.currency || null;\n\n // ------------------------------------------------------\n // 6. Check whether currencies match\n // ------------------------------------------------------\n\n const currencyMatch =\n   Boolean(budgetCurrency) \u0026\u0026\n   Boolean(fareCurrency) \u0026\u0026\n   budgetCurrency.toUpperCase() ===\n     fareCurrency.toUpperCase();\n\n // ------------------------------------------------------\n // 7. Initialize budget analysis\n // ------------------------------------------------------\n\n let budgetStatus = \"UNKNOWN\";\n let withinBudget = null;\n let budgetDifference = null;\n\n const currencyConversionRequired = !currencyMatch;\n\n // ------------------------------------------------------\n // 8. Compare budget only when currencies match\n // ------------------------------------------------------\n\n if (\n   currencyMatch \u0026\u0026\n   cheapestFare !== null \u0026\u0026\n   Number.isFinite(cheapestFare) \u0026\u0026\n   userBudget !== null \u0026\u0026\n   Number.isFinite(userBudget)\n ) {\n   budgetDifference = userBudget - cheapestFare;\n   withinBudget = cheapestFare \u003c= userBudget;\n\n   budgetStatus = withinBudget\n     ? \"WITHIN_BUDGET\"\n     : \"OVER_BUDGET\";\n } else if (!currencyMatch \u0026\u0026 cheapestFare !== null) {\n   budgetStatus = \"CURRENCY_CONVERSION_REQUIRED\";\n }\n\n // ------------------------------------------------------\n // 9. Extract relevant alternatives\n // ------------------------------------------------------\n\n const alternatives =\n   fareData.alternative_offers ||\n   fareData.relevant_alternatives ||\n   fareData.suitable_alternatives ||\n   [];\n\n // ------------------------------------------------------\n // 10. Collect prices for statistics\n // ------------------------------------------------------\n // Include only valid prices in the same currency.\n // This avoids mixing GBP and INR in fare statistics.\n // ------------------------------------------------------\n\n const availablePrices = [];\n\n if (\n   cheapestFare !== null \u0026\u0026\n   Number.isFinite(cheapestFare)\n ) {\n   availablePrices.push(cheapestFare);\n }\n\n for (const alternative of alternatives) {\n   const price =\n     alternative.price != null\n       ? Number(alternative.price)\n       : NaN;\n\n   const alternativeCurrency =\n     alternative.currency || fareCurrency;\n\n   if (\n     Number.isFinite(price) \u0026\u0026\n     (\n       !fareCurrency ||\n       alternativeCurrency.toUpperCase() ===\n         fareCurrency.toUpperCase()\n     )\n   ) {\n     availablePrices.push(price);\n   }\n }\n\n // ------------------------------------------------------\n // 11. Calculate fare statistics\n // ------------------------------------------------------\n\n const lowestFare =\n   availablePrices.length \u003e 0\n     ? Math.min(...availablePrices)\n     : null;\n\n const highestFare =\n   availablePrices.length \u003e 0\n     ? Math.max(...availablePrices)\n     : null;\n\n const averageFare =\n   availablePrices.length \u003e 0\n     ? availablePrices.reduce(\n         (sum, price) =\u003e sum + price,\n         0\n       ) / availablePrices.length\n     : null;\n\n // ------------------------------------------------------\n // 12. Preserve preferred-airline information\n // ------------------------------------------------------\n\n const preferredAirline = {\n   requested:\n     preferences.airline_preference || null,\n\n   available:\n     fareData.preferred_airline_availability ??\n     fareData.preferred_airline_available ??\n     false,\n\n   cheapest_offer:\n     fareData.preferred_airline_offer ??\n     fareData.preferred_airline_cheapest_offer ??\n     null\n };\n\n // ------------------------------------------------------\n // 13. FINAL OUTPUT\n // ------------------------------------------------------\n\n return [\n   {\n     json: {\n       // USER PREFERENCES\n       preferences: {\n         origin: preferences.origin || null,\n         destination: preferences.destination || null,\n         departure_date: preferences.departure_date || null,\n         return_date: preferences.return_date || null,\n         passengers: preferences.passengers ?? null,\n         budget: userBudget,\n         currency: budgetCurrency,\n         airline_preference:\n           preferences.airline_preference || null,\n         cabin_preference:\n           preferences.cabin_preference || null,\n         flexibility: preferences.flexibility || null\n       },\n\n       // FARE STATISTICS\n       fare_statistics: {\n         offers_analyzed: availablePrices.length,\n         lowest_fare: lowestFare,\n         highest_fare: highestFare,\n         average_fare: averageFare,\n         fare_currency: fareCurrency\n       },\n\n       // BUDGET ANALYSIS\n       budget_analysis: {\n         user_budget: userBudget,\n         budget_currency: budgetCurrency,\n         cheapest_fare: cheapestFare,\n         fare_currency: fareCurrency,\n         currency_match: currencyMatch,\n         currency_conversion_required:\n           currencyConversionRequired,\n         budget_status: budgetStatus,\n         within_budget: withinBudget,\n         budget_difference: budgetDifference\n       },\n\n       // PREFERRED AIRLINE\n       preferred_airline: preferredAirline,\n\n       // CHEAPEST CURRENT OFFER\n       cheapest_offer: cheapestOffer,\n\n       // CHEAPEST SUITABLE OFFER\n       cheapest_suitable_offer: cheapestSuitableOffer,\n\n       // ALTERNATIVES\n       alternatives: alternatives,\n\n       // FARE OBSERVATIONS\n       fare_observations:\n         fareData.fare_observations || [],\n\n       // SUMMARY\n       analysis_summary:\n         fareData.analysis_summary || \"\"\n     }\n   }\n ];\n"
+                                     },
+                      "id":  "8ee034cf-7498-4e0f-9806-39b8aaaa1e3a",
+                      "name":  "Fare Statistics \u0026 Budget Analysis",
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       -3200,
+                                       160
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "jsCode":  "\n/**\n * ML INPUT PREPARATION\n *\n * - Preserves the existing fare-analysis output.\n * - Reads every cleaned offer from Offer Processor \u0026 Test Data Filter.\n * - Prefers a compatible offer matching the user\u0027s airline preference.\n * - Otherwise selects a compatible comparison offer.\n * - Never invents missing route or airline information.\n * - Allows future-year attempts; the API must label extrapolations.\n */\n\nconst input = $input.first().json;\n\nconst preferences =\n  $(\u0027Preference Agent\u0027).first().json.output || {};\n\nconst processedOffers =\n  $(\u0027Offer Processor \u0026 Test Data Filter\u0027)\n    .all()\n    .map(item =\u003e item.json);\n\n// --------------------------------------------------\n// Supported routes\n// --------------------------------------------------\n\nconst routeDefinitions = [\n  { route: \"Delhi Ã¢â€ â€ Mumbai\", forward: [\"DEL\", \"BOM\"], backward: [\"BOM\", \"DEL\"] },\n  { route: \"Delhi Ã¢â€ â€ Bangalore\", forward: [\"DEL\", \"BLR\"], backward: [\"BLR\", \"DEL\"] },\n  { route: \"Delhi Ã¢â€ â€ Hyderabad\", forward: [\"DEL\", \"HYD\"], backward: [\"HYD\", \"DEL\"] },\n  { route: \"Mumbai Ã¢â€ â€ Bangalore\", forward: [\"BOM\", \"BLR\"], backward: [\"BLR\", \"BOM\"] },\n  { route: \"Mumbai Ã¢â€ â€ Hyderabad\", forward: [\"BOM\", \"HYD\"], backward: [\"HYD\", \"BOM\"] },\n  { route: \"Bangalore Ã¢â€ â€ Hyderabad\", forward: [\"BLR\", \"HYD\"], backward: [\"HYD\", \"BLR\"] }\n];\n\nconst airportToCity = {\n  DEL: \"Delhi\",\n  BOM: \"Mumbai\",\n  BLR: \"Bangalore\",\n  HYD: \"Hyderabad\"\n};\n\n// --------------------------------------------------\n// Airline normalization\n// --------------------------------------------------\n\nfunction normalizeAirline(value) {\n  const name = String(value || \"\").trim().toLowerCase();\n\n  const aliases = {\n    \"indigo\": \"IndiGo\",\n    \"6e\": \"IndiGo\",\n    \"vistara\": \"Vistara\",\n    \"uk\": \"Vistara\",\n    \"air india\": \"Air India\",\n    \"ai\": \"Air India\",\n    \"spicejet\": \"SpiceJet\",\n    \"sg\": \"SpiceJet\",\n    \"airasia\": \"AirAsia\",\n    \"airasia india\": \"AirAsia\"\n  };\n\n  return aliases[name] || null;\n}\n\nfunction getRoute(origin, destination) {\n  for (const definition of routeDefinitions) {\n    if (\n      origin === definition.forward[0] \u0026\u0026\n      destination === definition.forward[1]\n    ) {\n      return { route: definition.route, direction: \"Ã¢â€ â€™\" };\n    }\n\n    if (\n      origin === definition.backward[0] \u0026\u0026\n      destination === definition.backward[1]\n    ) {\n      return { route: definition.route, direction: \"Ã¢â€ Â\" };\n    }\n  }\n\n  return { route: null, direction: null };\n}\n\nfunction getYear(offer) {\n  const value =\n    offer?.departure ||\n    preferences?.departure_date ||\n    null;\n\n  if (!value) return null;\n\n  const match = String(value).match(/^(\\d{4})-/);\n\n  if (match) return Number(match[1]);\n\n  const date = new Date(value);\n\n  return Number.isNaN(date.getTime())\n    ? null\n    : date.getUTCFullYear();\n}\n\nfunction prepareCandidate(offer) {\n  if (!offer) return null;\n\n  const origin = String(\n    offer.origin || preferences?.origin || \"\"\n  ).trim().toUpperCase();\n\n  const destination = String(\n    offer.destination || preferences?.destination || \"\"\n  ).trim().toUpperCase();\n\n  const rawAirline = String(offer.airline || \"\").trim();\n  const airline = normalizeAirline(rawAirline);\n  const routeInfo = getRoute(origin, destination);\n  const year = getYear(offer);\n\n  // Do not use an offer for a different journey\n  // when the requested airports are available.\n  const requestedOrigin =\n    String(preferences?.origin || \"\").trim().toUpperCase();\n\n  const requestedDestination =\n    String(preferences?.destination || \"\").trim().toUpperCase();\n\n  const matchesRequestedRoute =\n    (!requestedOrigin || origin === requestedOrigin) \u0026\u0026\n    (!requestedDestination || destination === requestedDestination);\n\n  let reason = null;\n\n  if (!matchesRequestedRoute) {\n    reason = \"Offer does not match the requested route.\";\n  } else if (!routeInfo.route) {\n    reason = `ML training data does not cover route ${origin} Ã¢â€ â€™ ${destination}.`;\n  } else if (!airline) {\n    reason = `ML training data does not cover airline \"${rawAirline || \"unknown\"}\".`;\n  } else if (year === null) {\n    reason = \"Departure year could not be determined.\";\n  } else if (!routeInfo.direction) {\n    reason = \"A valid travel direction could not be determined.\";\n  }\n\n  return {\n    offer,\n    origin,\n    destination,\n    rawAirline,\n    normalizedAirline: airline,\n    year,\n    route: routeInfo.route,\n    direction: routeInfo.direction,\n    available: reason === null,\n    reason\n  };\n}\n\n// --------------------------------------------------\n// Gather candidate offers\n// --------------------------------------------------\n\nconst preferredAirline = normalizeAirline(\n  preferences?.airline_preference ||\n  preferences?.preferred_airline ||\n  \"\"\n);\n\nconst preferredOffer =\n  input.preferred_airline?.available === true\n    ? input.preferred_airline?.cheapest_offer\n    : null;\n\n// Include the Fare Intelligence preferred offer, if any,\n// plus every cleaned offer. Deduplicate by offer ID.\nconst rawCandidates = [];\nconst seenIds = new Set();\n\nfor (const offer of [preferredOffer, ...processedOffers]) {\n  if (!offer) continue;\n\n  const id = offer.offer_id || offer.id;\n\n  if (id \u0026\u0026 seenIds.has(id)) continue;\n  if (id) seenIds.add(id);\n\n  rawCandidates.push(offer);\n}\n\nconst candidates = rawCandidates\n  .map(prepareCandidate)\n  .filter(Boolean);\n\nconst compatibleCandidates =\n  candidates.filter(candidate =\u003e candidate.available);\n\n// --------------------------------------------------\n// Choose the cheapest candidate safely\n// --------------------------------------------------\n\n// Prices in different currencies must not be compared\n// as if they were the same currency.\nfunction chooseCheapest(offers) {\n  if (offers.length \u003c= 1) return offers[0] || null;\n\n  const currencies = new Set(\n    offers.map(item =\u003e\n      String(item.offer.currency || \"\").toUpperCase()\n    )\n  );\n\n  if (currencies.size !== 1 || currencies.has(\"\")) {\n    return offers[0];\n  }\n\n  return [...offers].sort((a, b) =\u003e {\n    const priceA = Number(a.offer.price);\n    const priceB = Number(b.offer.price);\n\n    if (!Number.isFinite(priceA)) return 1;\n    if (!Number.isFinite(priceB)) return -1;\n\n    return priceA - priceB;\n  })[0];\n}\n\n// First preference: a compatible offer from the requested airline.\nlet selected = null;\nlet selectionStatus = null;\n\nconst preferredCandidates = compatibleCandidates.filter(\n  candidate =\u003e\n    preferredAirline \u0026\u0026\n    candidate.normalizedAirline === preferredAirline\n);\n\nconst compatiblePreferredOffer =\n  preferredOffer\n    ? prepareCandidate(preferredOffer)\n    : null;\n\nif (\n  compatiblePreferredOffer?.available \u0026\u0026\n  (\n    !preferredAirline ||\n    compatiblePreferredOffer.normalizedAirline === preferredAirline\n  )\n) {\n  selected = compatiblePreferredOffer;\n  selectionStatus = \"PREFERRED_AIRLINE_OFFER_SELECTED\";\n} else if (preferredCandidates.length \u003e 0) {\n  selected = chooseCheapest(preferredCandidates);\n  selectionStatus = \"PREFERRED_AIRLINE_OFFER_SELECTED\";\n} else if (compatibleCandidates.length \u003e 0) {\n  selected = chooseCheapest(compatibleCandidates);\n  selectionStatus = \"ML_COMPATIBLE_COMPARISON_OFFER\";\n}\n\n/*\n * FALLBACK: ML reference estimate for the requested journey.\n * Use this only when Duffel returned no ML-compatible offer.\n * This does NOT create or claim a bookable flight offer.\n */\n\nif (!selected \u0026\u0026 preferredAirline) {\n  const requestedOrigin =\n    String(preferences?.origin || \"\").trim().toUpperCase();\n\n  const requestedDestination =\n    String(preferences?.destination || \"\").trim().toUpperCase();\n\n  const routeInfo = getRoute(\n    requestedOrigin,\n    requestedDestination\n  );\n\n  const requestedYear = getYear({\n    departure: preferences?.departure_date\n  });\n\n  const supportedAirlines = new Set([\n    \"IndiGo\",\n    \"Vistara\",\n    \"Air India\",\n    \"SpiceJet\",\n    \"AirAsia\"\n  ]);\n\n  if (\n    routeInfo.route \u0026\u0026\n    routeInfo.direction \u0026\u0026\n    supportedAirlines.has(preferredAirline) \u0026\u0026\n    requestedYear !== null\n  ) {\n    selected = {\n      offer: null,\n      origin: requestedOrigin,\n      destination: requestedDestination,\n      rawAirline: preferredAirline,\n      normalizedAirline: preferredAirline,\n      year: requestedYear,\n      route: routeInfo.route,\n      direction: routeInfo.direction,\n      available: true,\n      reason: null\n    };\n\n    selectionStatus =\n      \"REQUESTED_JOURNEY_ML_REFERENCE_ESTIMATE\";\n  }\n}\n\n// --------------------------------------------------\n// Explain why the ML candidate is unavailable\n// --------------------------------------------------\n\nlet reason = null;\n\nif (!selected) {\n  if (candidates.length === 0) {\n    reason = \"No flight offers were available for ML evaluation.\";\n  } else {\n    const requestedOrigin =\n      String(preferences?.origin || \"\").trim().toUpperCase();\n\n    const requestedDestination =\n      String(preferences?.destination || \"\").trim().toUpperCase();\n\n    const routeInfo = getRoute(\n      requestedOrigin,\n      requestedDestination\n    );\n\n    if (!routeInfo.route) {\n      reason =\n        `ML training data does not cover route ${requestedOrigin} Ã¢â€ â€™ ${requestedDestination}.`;\n    } else if (\n      !candidates.some(candidate =\u003e candidate.normalizedAirline)\n    ) {\n      reason =\n        \"None of the returned offers use an airline supported by the ML model.\";\n    } else {\n      reason =\n        \"No returned offer satisfies all ML eligibility requirements for the requested journey.\";\n    }\n  }\n}\n\n// --------------------------------------------------\n// Build source-offer details\n// --------------------------------------------------\n\nfunction sourceOfferDetails(offer) {\n  if (!offer) return null;\n\n  return {\n    offer_id: offer.offer_id || offer.id || null,\n    airline: offer.airline || null,\n    airline_code: offer.airline_code || null,\n    origin: offer.origin || null,\n    destination: offer.destination || null,\n    price: offer.price ?? null,\n    currency: offer.currency || null,\n    departure: offer.departure || null,\n    arrival: offer.arrival || null,\n    stops: offer.stops ?? null,\n    cabin: offer.cabin || null,\n    duration: offer.duration || null\n  };\n}\n\n// --------------------------------------------------\n// Return original analysis plus ML information\n// --------------------------------------------------\n\nreturn [\n  {\n    json: {\n      ...input,\n\n      ml_input: {\n        available: Boolean(selected),\n        selection_status:\n          selectionStatus || \"NO_ML_COMPATIBLE_OFFER\",\n        reason,\n\n        Route: selected?.route || null,\n        Airline: selected?.normalizedAirline || null,\n        Year: selected?.year ?? null,\n        Direction: selected?.direction || null,\n\n        source_offer:\n          sourceOfferDetails(selected?.offer || null),\n\n        comparison_offer:\n          selectionStatus === \"ML_COMPATIBLE_COMPARISON_OFFER\"\n            ? sourceOfferDetails(selected.offer)\n            : null,\n\n        requested_airline:\n          preferredAirline || null,\n\n        training_years: [2022, 2023],\n\n        prediction_note:\n          selected?.year \u003e 2023\n            ? \"Future-year prediction is an extrapolation, not a validated future fare forecast or a live ticket price.\"\n            : \"ML output is a model-generated reference estimate, not a live ticket price.\"\n      }\n    }\n  }\n];\n"
+                                     },
+                      "id":  "901a5544-ce90-4094-918c-2ddfffb13aa4",
+                      "name":  "ML Input Preparation",
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       -2976,
+                                       160
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "method":  "POST",
+                                         "url":  "https://YOUR-CLOUDFLARE-TUNNEL.trycloudflare.com/coverage",
+                                         "sendBody":  true,
+                                         "bodyParameters":  {
+                                                                "parameters":  [
+                                                                                   {
+                                                                                       "name":  "Route",
+                                                                                       "value":  "={{ $(\u0027ML Input Preparation\u0027).first().json.ml_input.Route }}"
+                                                                                   },
+                                                                                   {
+                                                                                       "name":  "Airline",
+                                                                                       "value":  "={{ $(\u0027ML Input Preparation\u0027).first().json.ml_input.Airline }}"
+                                                                                   }
+                                                                               ]
+                                                            },
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "83790592-4cb2-48b5-80ba-5cf07930dc6f",
+                      "name":  "ML Coverage Check",
+                      "type":  "n8n-nodes-base.httpRequest",
+                      "typeVersion":  4.5,
+                      "position":  [
+                                       -2752,
+                                       160
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "conditions":  {
+                                                            "options":  {
+                                                                            "caseSensitive":  true,
+                                                                            "leftValue":  "",
+                                                                            "typeValidation":  "strict",
+                                                                            "version":  3
+                                                                        },
+                                                            "conditions":  [
+                                                                               {
+                                                                                   "id":  "b5726571-3912-4c75-849f-5f343a6ca77e",
+                                                                                   "leftValue":  "={{ $json.covered }}",
+                                                                                   "rightValue":  "true",
+                                                                                   "operator":  {
+                                                                                                    "type":  "boolean",
+                                                                                                    "operation":  "true",
+                                                                                                    "singleValue":  true
+                                                                                                }
+                                                                               }
+                                                                           ],
+                                                            "combinator":  "and"
+                                                        },
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "15cc86c5-fbfa-4b8b-ad6b-1404343606fb",
+                      "name":  "If",
+                      "type":  "n8n-nodes-base.if",
+                      "typeVersion":  2.3,
+                      "position":  [
+                                       -2528,
+                                       160
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "method":  "POST",
+                                         "url":  "https://YOUR-CLOUDFLARE-TUNNEL.trycloudflare.com/predict",
+                                         "sendBody":  true,
+                                         "bodyParameters":  {
+                                                                "parameters":  [
+                                                                                   {
+                                                                                       "name":  "Route",
+                                                                                       "value":  "={{ $(\u0027ML Input Preparation\u0027).first().json.ml_input.Route }}"
+                                                                                   },
+                                                                                   {
+                                                                                       "name":  "Airline",
+                                                                                       "value":  "={{ $(\u0027ML Input Preparation\u0027).first().json.ml_input.Airline }}"
+                                                                                   },
+                                                                                   {
+                                                                                       "name":  "Year",
+                                                                                       "value":  "={{ $(\u0027ML Input Preparation\u0027).first().json.ml_input.Year }}"
+                                                                                   },
+                                                                                   {
+                                                                                       "name":  "Direction",
+                                                                                       "value":  "={{ $(\u0027ML Input Preparation\u0027).first().json.ml_input.Direction }}"
+                                                                                   }
+                                                                               ]
+                                                            },
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "7496ae57-3377-4cbf-acab-02ebba3c7034",
+                      "name":  "ML Prediction",
+                      "type":  "n8n-nodes-base.httpRequest",
+                      "typeVersion":  4.5,
+                      "position":  [
+                                       -2304,
+                                       80
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "jsCode":  "// ======================================================\n// ML RESULT HANDLER - AVAILABLE\n// ======================================================\n// Purpose:\n// Preserve the complete workflow data and attach the\n// successful historical ML prediction.\n//\n// This node runs only when ML Coverage Router = TRUE.\n// ======================================================\n\nconst originalData =\n  $(\u0027ML Input Preparation\u0027).first().json;\n\nconst prediction =\n  $input.first().json;\n\nreturn [\n  {\n    json: {\n      ...originalData,\n\n      ml_result: {\n        available: true,\n\n        prediction_available:\n          true,\n\n        predicted_fare:\n          prediction?.predicted_fare ?? null,\n\n        currency:\n          prediction?.currency || null,\n\n        prediction_type:\n          prediction?.prediction_type || null,\n\n        reason:\n          null,\n\n        coverage: {\n          covered:\n            true,\n\n          route:\n            originalData?.ml_input?.Route || null,\n\n          airline:\n            originalData?.ml_input?.Airline || null,\n\n          matching_training_records:\n            null\n        }\n      }\n    }\n  }\n];"
+                                     },
+                      "id":  "76db9cfb-4f8e-46c9-beaf-d622ad0292f7",
+                      "name":  "ML Result Handler",
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       -2080,
+                                       80
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "jsCode":  "// ======================================================\n// ML NOT AVAILABLE\n// ======================================================\n// Purpose:\n// Preserve the complete fare-intelligence data when the\n// historical ML model does not cover the selected\n// route + airline combination.\n//\n// The workflow must NOT stop simply because ML coverage\n// is unavailable.\n// ======================================================\n\nconst originalData =\n  $(\u0027ML Input Preparation\u0027).first().json;\n\nconst coverageResult =\n  $input.first().json;\n\nreturn [\n  {\n    json: {\n      ...originalData,\n\n      ml_result: {\n        available: false,\n\n        prediction_available:\n          false,\n\n        predicted_fare:\n          null,\n\n        currency:\n          null,\n\n        prediction_type:\n          null,\n\n        reason:\n          \"Historical ML model does not cover the selected route and airline.\",\n\n        coverage: {\n          covered:\n            coverageResult?.covered ?? false,\n\n          route:\n            coverageResult?.route || null,\n\n          airline:\n            coverageResult?.airline || null,\n\n          matching_training_records:\n            coverageResult?.matching_training_records ?? 0\n        }\n      }\n    }\n  }\n];"
+                                     },
+                      "id":  "1dedb32f-7406-4af6-8f69-10fadca65773",
+                      "name":  "ML Not Available",
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       -2080,
+                                       272
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "rule":  {
+                                                      "interval":  [
+                                                                       {
+                                                                           "field":  "minutes"
+                                                                       }
+                                                                   ]
+                                                  }
+                                     },
+                      "id":  "eee509a2-62a5-4cc3-b8c8-c06910ad59e0",
+                      "name":  "Monitoring Schedule",
+                      "type":  "n8n-nodes-base.scheduleTrigger",
+                      "typeVersion":  1.4,
+                      "position":  [
+                                       -704,
+                                       496
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "operation":  "get",
+                                         "dataTableId":  {
+                                                             "__rl":  true,
+                                                             "value":  "5XI0Nuxx36fobpoX",
+                                                             "mode":  "list",
+                                                             "cachedResultName":  "Flight Monitoring State",
+                                                             "cachedResultUrl":  "/projects/56kHyNYkNvLQsR6Q/datatables/5XI0Nuxx36fobpoX"
+                                                         },
+                                         "matchType":  "allConditions",
+                                         "filters":  {
+                                                         "conditions":  [
+                                                                            {
+                                                                                "keyName":  "active",
+                                                                                "condition":  "isTrue"
+                                                                            }
+                                                                        ]
+                                                     },
+                                         "returnAll":  true
+                                     },
+                      "id":  "00757ec3-dd7f-4d08-a68b-d0594af8ebd1",
+                      "name":  "Load Monitoring State",
+                      "type":  "n8n-nodes-base.dataTable",
+                      "typeVersion":  1.1,
+                      "position":  [
+                                       -432,
+                                       496
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "method":  "POST",
+                                         "url":  "https://api.duffel.com/air/offer_requests",
+                                         "authentication":  "genericCredentialType",
+                                         "genericAuthType":  "httpBearerAuth",
+                                         "sendHeaders":  true,
+                                         "headerParameters":  {
+                                                                  "parameters":  [
+                                                                                     {
+                                                                                         "name":  "Duffel-Version",
+                                                                                         "value":  "v2"
+                                                                                     },
+                                                                                     {
+                                                                                         "name":  "Accept",
+                                                                                         "value":  "application/json"
+                                                                                     }
+                                                                                 ]
+                                                              },
+                                         "sendBody":  true,
+                                         "specifyBody":  "json",
+                                         "jsonBody":  "={{ {\n  data: {\n    slices: [\n      {\n        origin: $json.origin,\n        destination: $json.destination,\n        departure_date: $json.departure_date\n      }\n    ],\n    passengers: Array.from(\n      { length: Number($json.passengers) },\n      () =\u003e ({ type: \"adult\" })\n    ),\n    cabin_class: \"economy\"\n  }\n} }}",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "6b108786-09fe-4ce6-bc4e-41ef83773ac1",
+                      "name":  "Monitoring Flight Search",
+                      "type":  "n8n-nodes-base.httpRequest",
+                      "typeVersion":  4.5,
+                      "position":  [
+                                       -208,
+                                       496
+                                   ],
+                      "credentials":  {
+                                          "httpBearerAuth":  {
+                                                                 "id":  "qK9dpFTrS0zeCHTM",
+                                                                 "name":  "Bearer Auth account"
+                                                             }
+                                      }
+                  },
+                  {
+                      "parameters":  {
+                                         "jsCode":  "\nconst responses = $input.all();\nconst monitors = $(\u0027Load Monitoring State\u0027).all();\n\nconst results = [];\n\nfor (let i = 0; i \u003c responses.length; i++) {\n  const response = responses[i].json || {};\n  const monitor = monitors[i]?.json || {};\n\n  const offers = Array.isArray(response?.data?.offers)\n    ? response.data.offers\n    : [];\n\n  const processedOffers = [];\n\n  for (const offer of offers) {\n    const ownerName = offer?.owner?.name || null;\n    const ownerCode = offer?.owner?.iata_code || null;\n\n    const firstSlice = Array.isArray(offer?.slices)\n      ? offer.slices[0]\n      : null;\n\n    const segments = Array.isArray(firstSlice?.segments)\n      ? firstSlice.segments\n      : [];\n\n    const firstSegment = segments[0] || null;\n\n    const marketingName =\n      firstSegment?.marketing_carrier?.name ||\n      ownerName;\n\n    const marketingCode =\n      firstSegment?.marketing_carrier?.iata_code ||\n      ownerCode;\n\n    const operatingName =\n      firstSegment?.operating_carrier?.name || null;\n\n    const operatingCode =\n      firstSegment?.operating_carrier?.iata_code || null;\n\n    const carrierNames = [\n      ownerName,\n      marketingName,\n      operatingName\n    ]\n      .filter(Boolean)\n      .map(name =\u003e String(name).trim().toLowerCase());\n\n    const carrierCodes = [\n      ownerCode,\n      marketingCode,\n      operatingCode\n    ]\n      .filter(Boolean)\n      .map(code =\u003e String(code).trim().toUpperCase());\n\n    if (\n      carrierCodes.includes(\"ZZ\") ||\n      carrierNames.includes(\"duffel airways\")\n    ) {\n      continue;\n    }\n\n    processedOffers.push({\n      offer_id: offer?.id || null,\n\n      airline:\n        operatingName || marketingName || null,\n\n      airline_code:\n        operatingCode || marketingCode || null,\n\n      marketing_airline: marketingName || null,\n      marketing_airline_code: marketingCode || null,\n\n      operating_airline: operatingName,\n      operating_airline_code: operatingCode,\n\n      origin:\n        firstSlice?.origin?.iata_code ||\n        firstSegment?.origin?.iata_code ||\n        null,\n\n      destination:\n        firstSlice?.destination?.iata_code ||\n        firstSegment?.destination?.iata_code ||\n        null,\n\n      price: offer?.total_amount != null\n        ? Number(offer.total_amount)\n        : null,\n\n      currency: offer?.total_currency || null,\n\n      departure: firstSegment?.departing_at || null,\n      arrival: firstSegment?.arriving_at || null,\n\n      stops: segments.length \u003e 0\n        ? Math.max(segments.length - 1, 0)\n        : null,\n\n      duration: firstSlice?.duration || null,\n\n      cabin:\n        firstSegment?.passengers?.[0]?.cabin_class ||\n        null,\n\n      marketing_flight_number:\n        firstSegment?.marketing_carrier_flight_number ||\n        null,\n\n      operating_flight_number:\n        firstSegment?.operating_carrier_flight_number ||\n        null\n    });\n  }\n\n  results.push({\n    json: {\n      monitor: {\n        monitor_id: monitor.monitor_id || null,\n        origin: monitor.origin || null,\n        destination: monitor.destination || null,\n        departure_date: monitor.departure_date || null,\n        passengers: monitor.passengers ?? null,\n        budget: monitor.budget ?? null,\n        currency: monitor.currency || null,\n        preferred_airline: monitor.preferred_airline || null,\n        last_fare: monitor.last_fare ?? null,\n        last_currency: monitor.last_currency || null,\n        last_decision: monitor.last_decision || null,\n        last_checked: monitor.last_checked || null\n      },\n\n      offers: processedOffers,\n      offer_count: processedOffers.length\n    }\n  });\n}\n\nreturn results;\n"
+                                     },
+                      "id":  "6bdbbf7f-85c2-4579-8bfb-c35582696160",
+                      "name":  "Monitoring Offer Processor",
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       16,
+                                       496
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "jsCode":  "\nconst inputs = $input.all();\nconst results = [];\n\nfor (const item of inputs) {\n  const input = item.json || {};\n  const monitor = input.monitor || {};\n  const offers = Array.isArray(input.offers) ? input.offers : [];\n\n  const previousFare =\n    monitor.last_fare != null ? Number(monitor.last_fare) : null;\n\n  const previousCurrency =\n    String(monitor.last_currency || monitor.currency || \"INR\").toUpperCase();\n\n  const budget =\n    monitor.budget != null ? Number(monitor.budget) : null;\n\n  const budgetCurrency =\n    String(monitor.currency || \"INR\").toUpperCase();\n\n  const preferredAirline =\n    String(monitor.preferred_airline || \"\").trim().toUpperCase();\n\n  const matchingOffers = offers.filter(offer =\u003e {\n    const originMatches =\n      String(offer.origin || \"\").toUpperCase() ===\n      String(monitor.origin || \"\").toUpperCase();\n\n    const destinationMatches =\n      String(offer.destination || \"\").toUpperCase() ===\n      String(monitor.destination || \"\").toUpperCase();\n\n    const airlineMatches =\n      !preferredAirline ||\n      String(offer.airline_code || \"\").toUpperCase() === preferredAirline ||\n      String(offer.airline || \"\").trim().toUpperCase() === preferredAirline;\n\n    const priceIsValid =\n      Number.isFinite(Number(offer.price)) \u0026\u0026\n      offer.price !== null \u0026\u0026\n      Boolean(offer.currency);\n\n    return originMatches \u0026\u0026 destinationMatches \u0026\u0026\n      airlineMatches \u0026\u0026 priceIsValid;\n  });\n\n  const currencyMatches = matchingOffers.filter(offer =\u003e\n    String(offer.currency).toUpperCase() === budgetCurrency\n  );\n\n  currencyMatches.sort((a, b) =\u003e Number(a.price) - Number(b.price));\n\n  const cheapest = currencyMatches[0] || null;\n\n  let fareChange = null;\n  let fareDropPercent = null;\n\n  if (\n    cheapest \u0026\u0026\n    previousFare !== null \u0026\u0026\n    Number.isFinite(previousFare) \u0026\u0026\n    previousCurrency === String(cheapest.currency).toUpperCase()\n  ) {\n    fareChange = Number(cheapest.price) - previousFare;\n    fareDropPercent = previousFare \u003e 0\n      ? ((previousFare - Number(cheapest.price)) / previousFare) * 100\n      : null;\n  }\n\n  const belowBudget =\n    cheapest !== null \u0026\u0026\n    budget !== null \u0026\u0026\n    Number.isFinite(budget) \u0026\u0026\n    String(cheapest.currency).toUpperCase() === budgetCurrency \u0026\u0026\n    Number(cheapest.price) \u003c= budget;\n\n  results.push({\n    json: {\n      monitor,\n      monitoring_analysis: {\n        current_offer_count: matchingOffers.length,\n        currency_matched_offer_count: currencyMatches.length,\n        cheapest_current_offer: cheapest,\n        previous_fare: previousFare,\n        previous_currency: previousCurrency,\n        budget,\n        budget_currency: budgetCurrency,\n        fare_change: fareChange,\n        fare_drop_percent: fareDropPercent,\n        below_budget: belowBudget,\n        currency_comparable:\n          Boolean(cheapest) \u0026\u0026\n          String(cheapest.currency).toUpperCase() === previousCurrency,\n        analysis_status: cheapest\n          ? \"OFFERS_FOUND\"\n          : \"NO_COMPARABLE_OFFERS\"\n      }\n    }\n  });\n}\n\nreturn results;\n"
+                                     },
+                      "id":  "a4e2d2cf-633e-402f-8c84-03dc02c3ed6a",
+                      "name":  "Monitoring Analysis",
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       240,
+                                       496
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "url":  "={{ \u0027https://open.er-api.com/v6/latest/\u0027 + ($json.monitor.currency || \u0027INR\u0027) }}",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "deb9037b-5250-4ba5-9391-75e6fcf5a50c",
+                      "name":  "Monitoring Exchange Rate API",
+                      "type":  "n8n-nodes-base.httpRequest",
+                      "typeVersion":  4.5,
+                      "position":  [
+                                       464,
+                                       496
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "jsCode":  "\nconst exchangeItems = $input.all();\nconst analysisItems = $(\u0027Monitoring Analysis\u0027).all();\nconst processorItems = $(\u0027Monitoring Offer Processor\u0027).all();\n\nconst results = [];\n\nfunction toNumber(value) {\n  if (value === null || value === undefined || value === \u0027\u0027) {\n    return null;\n  }\n\n  const n = Number(value);\n  return Number.isFinite(n) ? n : null;\n}\n\nfor (let i = 0; i \u003c processorItems.length; i++) {\n  const processed = processorItems[i]?.json || {};\n  const analysis = analysisItems[i]?.json || {};\n  const exchangeData = exchangeItems[i]?.json || {};\n\n  const monitor = processed.monitor || analysis.monitor || {};\n  const monitoring = analysis.monitoring_analysis || {};\n  const offers = Array.isArray(processed.offers)\n    ? processed.offers\n    : [];\n\n  const targetCurrency = String(monitor.currency || \u0027INR\u0027).toUpperCase();\n  const budget = toNumber(monitor.budget);\n  const previousFare = toNumber(monitor.last_fare);\n  const previousCurrency = String(\n    monitor.last_currency || targetCurrency\n  ).toUpperCase();\n\n  const rates = exchangeData.rates || {};\n  const baseCode = String(\n    exchangeData.base_code || \u0027\u0027\n  ).toUpperCase();\n\n  function convertToTarget(amount, sourceCurrency) {\n    const price = toNumber(amount);\n    const source = String(sourceCurrency || \u0027\u0027).toUpperCase();\n\n    if (price === null || !source || !targetCurrency) {\n      return null;\n    }\n\n    if (source === targetCurrency) {\n      return price;\n    }\n\n    // This workflow requests rates with INR as the base.\n    // rates.GBP means how many GBP equal 1 INR.\n    if (baseCode === \u0027INR\u0027 \u0026\u0026 targetCurrency === \u0027INR\u0027) {\n      const sourceRate = toNumber(rates[source]);\n\n      if (sourceRate === null || sourceRate \u003c= 0) {\n        return null;\n      }\n\n      return price / sourceRate;\n    }\n\n    // General conversion when the API base matches the source currency.\n    if (baseCode === source) {\n      const targetRate = toNumber(rates[targetCurrency]);\n\n      if (targetRate === null) {\n        return null;\n      }\n\n      return price * targetRate;\n    }\n\n    return null;\n  }\n\n  const normalizedOffers = offers\n    .filter(offer =\u003e\n      String(offer.origin || \u0027\u0027).toUpperCase() ===\n        String(monitor.origin || \u0027\u0027).toUpperCase() \u0026\u0026\n      String(offer.destination || \u0027\u0027).toUpperCase() ===\n        String(monitor.destination || \u0027\u0027).toUpperCase()\n    )\n    .map(offer =\u003e {\n      const originalPrice = toNumber(offer.price);\n      const originalCurrency = String(\n        offer.currency || \u0027\u0027\n      ).toUpperCase();\n\n      const converted = convertToTarget(\n        originalPrice,\n        originalCurrency\n      );\n\n      const normalizedPrice = converted === null\n        ? null\n        : Number(converted.toFixed(2));\n\n      return {\n        ...offer,\n        original_price: originalPrice,\n        original_currency: originalCurrency || null,\n        normalized_price: normalizedPrice,\n        normalized_currency: targetCurrency,\n        exchange_rate: normalizedPrice !== null \u0026\u0026\n          originalPrice !== null \u0026\u0026\n          originalPrice !== 0\n            ? Number((normalizedPrice / originalPrice).toFixed(8))\n            : null,\n        within_budget: normalizedPrice !== null \u0026\u0026\n          budget !== null\n            ? normalizedPrice \u003c= budget\n            : null\n      };\n    });\n\n  const comparableOffers = normalizedOffers\n    .filter(offer =\u003e offer.normalized_price !== null)\n    .sort((a, b) =\u003e a.normalized_price - b.normalized_price);\n\n  const cheapest = comparableOffers[0] || null;\n\n  const budgetOffers = comparableOffers.filter(\n    offer =\u003e offer.within_budget === true\n  );\n\n  const preferredAirline = String(\n    monitor.preferred_airline || \u0027\u0027\n  ).trim().toUpperCase();\n\n  const preferredOffers = preferredAirline\n    ? comparableOffers.filter(offer =\u003e\n        String(offer.airline_code || \u0027\u0027).toUpperCase() === preferredAirline ||\n        String(offer.airline || \u0027\u0027).trim().toUpperCase() === preferredAirline\n      )\n    : [];\n\n  const cheapestPreferred = preferredOffers[0] || null;\n\n  let fareChange = null;\n  let fareChangeAmount = null;\n  let fareChangePercent = null;\n\n  if (\n    cheapest \u0026\u0026\n    previousFare !== null \u0026\u0026\n    previousCurrency === targetCurrency\n  ) {\n    fareChangeAmount = Number(\n      (cheapest.normalized_price - previousFare).toFixed(2)\n    );\n\n    fareChangePercent = previousFare !== 0\n      ? Number(\n          ((fareChangeAmount / previousFare) * 100).toFixed(2)\n        )\n      : null;\n\n    fareChange = fareChangeAmount \u003c 0\n      ? \u0027DECREASE\u0027\n      : fareChangeAmount \u003e 0\n        ? \u0027INCREASE\u0027\n        : \u0027NO_CHANGE\u0027;\n  }\n\n  const events = [];\n\n  if (fareChange === \u0027DECREASE\u0027) events.push(\u0027FARE_DECREASE\u0027);\n  if (fareChange === \u0027INCREASE\u0027) events.push(\u0027FARE_INCREASE\u0027);\n  if (fareChange === \u0027NO_CHANGE\u0027) events.push(\u0027NO_FARE_CHANGE\u0027);\n  if (preferredOffers.length \u003e 0) {\n    events.push(\u0027PREFERRED_AIRLINE_AVAILABLE\u0027);\n  }\n  if (budgetOffers.length \u003e 0) {\n    events.push(\u0027BUDGET_OPTION_AVAILABLE\u0027);\n  }\n  if (offers.length === 0) events.push(\u0027NO_CURRENT_OFFERS\u0027);\n  if (comparableOffers.length === 0 \u0026\u0026 offers.length \u003e 0) {\n    events.push(\u0027NO_COMPARABLE_OFFERS\u0027);\n  }\n\n  const meaningfulChange = events.some(event =\u003e\n    [\n      \u0027FARE_DECREASE\u0027,\n      \u0027PREFERRED_AIRLINE_AVAILABLE\u0027,\n      \u0027BUDGET_OPTION_AVAILABLE\u0027\n    ].includes(event)\n  );\n\n  results.push({\n    json: {\n      monitor,\n\n      normalized_offers: normalizedOffers,\n\n      monitoring_analysis: {\n        ...monitoring,\n        current_offer_count: offers.length,\n        comparable_offer_count: comparableOffers.length,\n        cheapest_current_offer: cheapest,\n        preferred_airline: {\n          requested: preferredAirline || null,\n          available: preferredOffers.length \u003e 0,\n          cheapest_offer: cheapestPreferred\n        },\n        previous_fare: previousFare,\n        previous_currency: previousCurrency,\n        current_fare: cheapest?.normalized_price ?? null,\n        current_currency: targetCurrency,\n        fare_change: fareChange,\n        fare_change_amount: fareChangeAmount,\n        fare_change_percent: fareChangePercent,\n        budget,\n        budget_currency: targetCurrency,\n        budget_offers: budgetOffers,\n        budget_option_count: budgetOffers.length,\n        events,\n        meaningful_change: meaningfulChange,\n        currency_normalization:\n          comparableOffers.length \u003e 0 ? \u0027COMPLETED\u0027 : \u0027NO_COMPARABLE_OFFERS\u0027,\n        exchange_rate_base: baseCode,\n        exchange_rate_api_status: exchangeData.result || \u0027UNKNOWN\u0027\n      }\n    }\n  });\n}\n\nreturn results;\n"
+                                     },
+                      "id":  "e8e8eabb-8c72-45ca-a655-a7cc7fbba71b",
+                      "name":  "Monitoring Currency Normalization",
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       688,
+                                       496
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "promptType":  "define",
+                                         "text":  "={{ JSON.stringify($json) }}",
+                                         "hasOutputParser":  true,
+                                         "options":  {
+                                                         "systemMessage":  "You are the Monitoring Decision Agent in an Agentic Flight Fare Intelligence and Budget Alert System.\n\nYour responsibility is to evaluate the latest monitoring results and decide whether a meaningful travel-fare event should trigger a user alert.\n\nYou receive:\n1. The stored monitoring state from the previous monitoring cycle.\n2. Current flight offers.\n3. Currency-normalized fare information.\n4. Budget information.\n5. Preferred-airline information.\n6. Monitoring events detected by deterministic processing.\n\nYour job is to interpret these facts and make a transparent monitoring decision.\n\nUse exactly one decision label:\n\nALERT\nNO_ALERT\nMONITOR\n\nRules:\n\n1. If there are no current offers, do not generate a fare alert. Use NO_ALERT or MONITOR.\n\n2. If a current fare has decreased compared with the previous comparable fare, consider ALERT.\n\n3. If a preferred airline becomes available, consider ALERT when the event is meaningful to the user\u0027s preferences.\n\n4. If a flight option is within the user\u0027s budget after valid currency normalization, consider ALERT.\n\n5. If a preferred airline has become available and its fare is within the user\u0027s budget, this is a high-value alert condition.\n\n6. If a suitable alternative is within budget while the preferred airline is unavailable, consider ALERT when it represents a meaningful opportunity.\n\n7. Never compare fares numerically when currencies are not comparable.\n\n8. Use the currency-normalized values supplied by the upstream Currency Normalization node. Do not perform your own currency conversion.\n\n9. Never invent fares, airlines, availability, fare changes, exchange rates, or future trends.\n\n10. Do not treat a fare decrease alone as proof that the fare will remain low.\n\n11. Duffel Test Mode inventory is test/synthetic evidence. Do not present it as guaranteed real-world availability.\n\n12. Avoid unnecessary alerts. The purpose of monitoring is to alert the user only when something meaningful has changed or a useful opportunity has appeared.\n\n13. If the same situation provides no meaningful new information, prefer NO_ALERT.\n\n14. If there is insufficient evidence for an alert but continued monitoring is appropriate, use MONITOR.\n\n15. Do not make or claim to have made a booking.\n\nReturn only the structured output required by the connected Output Parser."
+                                                     }
+                                     },
+                      "id":  "e75b2434-513e-47f7-91a5-c88afb7e1d08",
+                      "name":  "Monitoring Decision Agent",
+                      "type":  "@n8n/n8n-nodes-langchain.agent",
+                      "typeVersion":  3.1,
+                      "position":  [
+                                       912,
+                                       496
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "modelName":  "models/gemini-2.5-flash",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "862a120c-832d-4ee0-929e-3496b4f94112",
+                      "name":  "Google Gemini Chat Model3",
+                      "type":  "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+                      "typeVersion":  1.2,
+                      "position":  [
+                                       784,
+                                       704
+                                   ],
+                      "credentials":  {
+                                          "googlePalmApi":  {
+                                                                "id":  null,
+                                                                "name":  "",
+                                                                "__aiGatewayManaged":  true
+                                                            }
+                                      }
+                  },
+                  {
+                      "parameters":  {
+                                         "schemaType":  "manual",
+                                         "inputSchema":  "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"decision\": {\n      \"type\": \"string\",\n      \"enum\": [\n        \"ALERT\",\n        \"NO_ALERT\",\n        \"MONITOR\"\n      ]\n    },\n    \"confidence\": {\n      \"type\": \"string\",\n      \"enum\": [\n        \"HIGH\",\n        \"MEDIUM\",\n        \"LOW\"\n      ]\n    },\n    \"reason\": {\n      \"type\": \"string\"\n    },\n    \"alert_reasons\": {\n      \"type\": \"array\",\n      \"items\": {\n        \"type\": \"string\"\n      }\n    },\n    \"recommended_offer\": {\n      \"type\": [\n        \"object\",\n        \"null\"\n      ]\n    },\n    \"next_action\": {\n      \"type\": \"string\"\n    }\n  },\n  \"required\": [\n    \"decision\",\n    \"confidence\",\n    \"reason\",\n    \"alert_reasons\",\n    \"recommended_offer\",\n    \"next_action\"\n  ]\n}"
+                                     },
+                      "id":  "ecd26e51-634d-4ea4-976b-25b45a886566",
+                      "name":  "Structured Output Parser3",
+                      "type":  "@n8n/n8n-nodes-langchain.outputParserStructured",
+                      "typeVersion":  1.3,
+                      "position":  [
+                                       1088,
+                                       704
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "promptType":  "define",
+                                         "text":  "={{ JSON.stringify($json) }}",
+                                         "hasOutputParser":  true,
+                                         "options":  {
+                                                         "systemMessage":  "You are the Alerting Agent in an Agentic Flight Fare Intelligence and Budget Alert System.\n\nYour task is to turn the incoming monitoring data into a clear, concise, truthful notification for the traveler.\n\nThe input may contain:\n- Monitoring preferences and monitor ID\n- Route, travel date, passenger count, and preferred airline\n- Previous fare and current currency-normalized fare\n- Monitoring events and fare-change information\n- The Monitoring Decision Agent\u0027s decision and reasoning\n- A `should_alert` flag from the upstream monitoring logic\n- Duffel inventory that may be in Test Mode\n\n## Alert decision rules\n\n1. If `should_alert` is explicitly `false`, set `send_alert` to `false`.\n2. If the decision is `NO_ALERT` or `MONITOR`, set `send_alert` to `false` and use `INFORMATIONAL`.\n3. Only consider sending a user alert when the decision is `ALERT` and `should_alert` is explicitly `true`.\n4. Never turn an informational monitoring update into a sendable alert just because an offer is within budget or a signature changed.\n5. If the decision is missing, contradictory, or insufficiently supported, default to `send_alert: false` and `INFORMATIONAL`.\n\n## Notification content\n\n- Include the route, travel date, passenger count, and relevant airline when available.\n- For a fare decrease, state the previous fare, current fare, and decrease only when the values are available and currency-comparable.\n- For a within-budget offer, state the normalized current fare and budget when both are available in the same currency.\n- Mention whether the preferred airline is available, or identify a suitable alternative when supported by the input.\n- Use upstream currency-normalized values. Do not perform your own currency conversion.\n- If currencies cannot be compared, explain that a direct comparison is unavailable.\n- Do not invent fares, airlines, routes, availability, exchange rates, trends, or predictions.\n- Duffel Test Mode inventory is synthetic/test evidence. Never present it as verified real-world availability or a confirmed bookable fare.\n- Never claim that a booking was made or that a fare is guaranteed to remain available.\n- Never expose internal workflow implementation details.\n- Keep notifications professional, concise, and useful.\n\n## Allowed alert types\n\nUse exactly one:\n- BOOKING_RECOMMENDATION\n- BUDGET_ALERT\n- ALTERNATIVE_FLIGHT\n- MONITORING_ALERT\n- INFORMATIONAL\n\nFor `MONITOR` or `NO_ALERT`, always use `INFORMATIONAL` and `send_alert: false`.\n\nReturn only the structured output required by the connected Output Parser."
+                                                     }
+                                     },
+                      "id":  "9316abf7-ae1d-473c-a9fe-5fb7ca75b2a9",
+                      "name":  "Alerting Agent",
+                      "type":  "@n8n/n8n-nodes-langchain.agent",
+                      "typeVersion":  3.1,
+                      "position":  [
+                                       1824,
+                                       496
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "modelName":  "models/gemini-2.5-flash",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "8ed39d4a-1585-4db2-b89c-7f7f7b3ecb6f",
+                      "name":  "Google Gemini Chat Model4",
+                      "type":  "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+                      "typeVersion":  1.2,
+                      "position":  [
+                                       1760,
+                                       720
+                                   ],
+                      "credentials":  {
+                                          "googlePalmApi":  {
+                                                                "id":  null,
+                                                                "name":  "",
+                                                                "__aiGatewayManaged":  true
+                                                            }
+                                      }
+                  },
+                  {
+                      "parameters":  {
+                                         "schemaType":  "manual",
+                                         "inputSchema":  "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"send_alert\": {\n      \"type\": \"boolean\"\n    },\n    \"alert_type\": {\n      \"type\": \"string\",\n      \"enum\": [\n        \"BOOKING_RECOMMENDATION\",\n        \"BUDGET_ALERT\",\n        \"ALTERNATIVE_FLIGHT\",\n        \"MONITORING_ALERT\",\n        \"INFORMATIONAL\"\n      ]\n    },\n    \"subject\": {\n      \"type\": \"string\"\n    },\n    \"message\": {\n      \"type\": \"string\"\n    },\n    \"next_action\": {\n      \"type\": \"string\"\n    }\n  },\n  \"required\": [\n    \"send_alert\",\n    \"alert_type\",\n    \"subject\",\n    \"message\",\n    \"next_action\"\n  ]\n}"
+                                     },
+                      "id":  "40090d3b-1e0f-46f3-8e4a-4e2a1bb7b1ba",
+                      "name":  "Structured Output Parser4",
+                      "type":  "@n8n/n8n-nodes-langchain.outputParserStructured",
+                      "typeVersion":  1.3,
+                      "position":  [
+                                       2128,
+                                       704
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "conditions":  {
+                                                            "options":  {
+                                                                            "caseSensitive":  true,
+                                                                            "leftValue":  "",
+                                                                            "typeValidation":  "strict",
+                                                                            "version":  3
+                                                                        },
+                                                            "conditions":  [
+                                                                               {
+                                                                                   "id":  "1a2b6360-ba3c-4429-9e25-b6f865a09b2d",
+                                                                                   "leftValue":  "={{ $json.output.send_alert }}",
+                                                                                   "rightValue":  "true",
+                                                                                   "operator":  {
+                                                                                                    "type":  "boolean",
+                                                                                                    "operation":  "true",
+                                                                                                    "singleValue":  true
+                                                                                                }
+                                                                               },
+                                                                               {
+                                                                                   "id":  "516d8766-8141-4417-bb5c-8927a6687f3e",
+                                                                                   "leftValue":  "={{ $(\u0027Monitoring Alert Signature Check\u0027).item.json.should_alert }}",
+                                                                                   "rightValue":  "",
+                                                                                   "operator":  {
+                                                                                                    "type":  "boolean",
+                                                                                                    "operation":  "true",
+                                                                                                    "singleValue":  true
+                                                                                                }
+                                                                               }
+                                                                           ],
+                                                            "combinator":  "and"
+                                                        },
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "efc85518-ff92-4b93-aba0-3f8e47d42af9",
+                      "name":  "If1",
+                      "type":  "n8n-nodes-base.if",
+                      "typeVersion":  2.3,
+                      "position":  [
+                                       2192,
+                                       496
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "fromEmail":  "YOUR_SENDER_EMAIL@example.com",
+                                         "toEmail":  "YOUR_RECIPIENT_EMAIL@example.com",
+                                         "subject":  "={{ $json.output.subject }}",
+                                         "html":  "={{ $json.output.message }}",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "71032a9b-d9cb-474e-aca9-9621d37ba899",
+                      "name":  "Send Monitoring Alert",
+                      "type":  "n8n-nodes-base.emailSend",
+                      "typeVersion":  2.1,
+                      "position":  [
+                                       2448,
+                                       368
+                                   ],
+                      "webhookId":  "c55cf5cb-4079-4fcb-bdd6-bcd0649c293d",
+                      "credentials":  {
+                                          "smtp":  {
+                                                       "id":  "1CRKTMwAKo7sBW9j",
+                                                       "name":  "SMTP account"
+                                                   }
+                                      }
+                  },
+                  {
+                      "parameters":  {
+
+                                     },
+                      "id":  "59b414b6-1616-415d-934f-1ea9ebfe7a0a",
+                      "name":  "Merge",
+                      "type":  "n8n-nodes-base.merge",
+                      "typeVersion":  3.2,
+                      "position":  [
+                                       -1856,
+                                       80
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "url":  "=https://open.er-api.com/v6/latest/{{ $json.cheapest_offer?.currency || $json.currency || \u0027INR\u0027 }}",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "286f916a-8498-4b26-a3f3-03d5a67a70b6",
+                      "name":  "Exchange Rate API",
+                      "type":  "n8n-nodes-base.httpRequest",
+                      "typeVersion":  4.5,
+                      "position":  [
+                                       -1632,
+                                       80
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "jsCode":  "const exchangeData = $input.first().json;\n\nconst originalData =\n  $(\u0027Merge\u0027).first().json;\n\nconst preferences =\n  originalData.preferences || {};\n\nconst cheapestOffer =\n  originalData.cheapest_offer || null;\n\nconst originalFare =\n  cheapestOffer?.price != null\n    ? Number(cheapestOffer.price)\n    : null;\n\nconst originalCurrency =\n  cheapestOffer?.currency\n    ? String(cheapestOffer.currency).toUpperCase()\n    : null;\n\nconst targetCurrency =\n  preferences?.currency\n    ? String(preferences.currency).toUpperCase()\n    : null;\n\nconst userBudget =\n  preferences?.budget != null\n    ? Number(preferences.budget)\n    : null;\n\nconst exchangeRate =\n  originalCurrency === targetCurrency\n    ? 1\n    : Number(exchangeData?.rates?.[targetCurrency]);\n\nlet convertedFare = null;\nlet budgetDifference = null;\nlet withinBudget = null;\nlet budgetStatus = \"UNKNOWN\";\nlet conversionAvailable = false;\n\nif (\n  originalFare !== null \u0026\u0026\n  Number.isFinite(originalFare) \u0026\u0026\n  targetCurrency \u0026\u0026\n  exchangeRate !== null \u0026\u0026\n  Number.isFinite(exchangeRate)\n) {\n  conversionAvailable = true;\n\n  convertedFare =\n    originalFare * exchangeRate;\n\n  if (\n    userBudget !== null \u0026\u0026\n    Number.isFinite(userBudget)\n  ) {\n    budgetDifference =\n      userBudget - convertedFare;\n\n    withinBudget =\n      convertedFare \u003c= userBudget;\n\n    budgetStatus =\n      withinBudget\n        ? \"WITHIN_BUDGET\"\n        : \"OVER_BUDGET\";\n  }\n}\nelse if (\n  originalCurrency \u0026\u0026\n  targetCurrency \u0026\u0026\n  originalCurrency === targetCurrency \u0026\u0026\n  originalFare !== null\n) {\n  conversionAvailable = true;\n  convertedFare = originalFare;\n\n  if (\n    userBudget !== null \u0026\u0026\n    Number.isFinite(userBudget)\n  ) {\n    budgetDifference =\n      userBudget - convertedFare;\n\n    withinBudget =\n      convertedFare \u003c= userBudget;\n\n    budgetStatus =\n      withinBudget\n        ? \"WITHIN_BUDGET\"\n        : \"OVER_BUDGET\";\n  }\n}\nelse {\n  budgetStatus = \"CURRENCY_CONVERSION_UNAVAILABLE\";\n}\n\nreturn [\n  {\n    json: {\n      ...originalData,\n\n      currency_conversion: {\n        conversion_available: conversionAvailable,\n\n        original_fare: originalFare,\n        original_currency: originalCurrency,\n\n        target_currency: targetCurrency,\n\n        exchange_rate: conversionAvailable\n          ? exchangeRate\n          : null,\n\n        converted_fare:\n          convertedFare !== null\n            ? Number(convertedFare.toFixed(2))\n            : null,\n\n        user_budget: userBudget,\n\n        budget_difference:\n          budgetDifference !== null\n            ? Number(budgetDifference.toFixed(2))\n            : null,\n\n        within_budget: withinBudget,\n\n        budget_status: budgetStatus\n      }\n    }\n  }\n];"
+                                     },
+                      "id":  "104f9ff3-567b-46e8-b2e0-50b8e90cd636",
+                      "name":  "Currency Normalization",
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       -1408,
+                                       80
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "promptType":  "define",
+                                         "text":  "={{ JSON.stringify($json) }}",
+                                         "hasOutputParser":  true,
+                                         "options":  {
+                                                         "systemMessage":  "You are the Decision Agent in an Agentic Flight Fare Intelligence and Budget Alert System.\n\nYour responsibility is to make a transparent travel decision using the structured fare intelligence, user preferences, and ML context supplied by upstream nodes.\n\nYou do not search for flights, perform unsupported currency conversions, invent missing information, or make bookings.\n\nUse exactly one of these decision labels:\nBOOK\nCONSIDER\nWAIT\nMONITOR\nALTERNATIVE\n\nRules:\n\n1. Respect the user\u0027s preferred airline when one is specified. If it is unavailable, explicitly state that.\n\n2. Never claim that a fare is within or over the user\u0027s budget when the fare currency and budget currency are different.\n\n3. When currencies differ, set the budget status to CURRENCY_CONVERSION_REQUIRED and do not perform a numerical comparison.\n\n4. If the ML model is unavailable for the selected route or airline, do not treat this as a system failure. Make the decision using the available fare intelligence and clearly state that ML reference pricing was unavailable.\n\n5. Treat an ML prediction as historical reference information, not as a guaranteed future fare.\n\n6. Consider the user\u0027s airline, cabin, budget, number of stops, duration, and other stated preferences when making the decision.\n\n7. Never invent fare trends, future prices, flight availability, airlines, or travel information.\n\n8. Do not make or claim to have made a booking.\n\n9. Duffel Test Mode inventory is test/synthetic evidence. Do not present it as guaranteed real-world availability.\n\n10. If the preferred airline is unavailable, consider whether an alternative airline is reasonable, but clearly identify it as an alternative.\n\n11. If the available evidence is insufficient to justify booking, prefer WAIT or MONITOR rather than BOOK.\n\n12. Keep the reason concise but explain the main factors behind the decision.\n\nReturn only the structured output required by the connected Output Parser."
+                                                     }
+                                     },
+                      "id":  "d01fb017-68db-4bab-9530-33d1bdb02b93",
+                      "name":  "Decision Agent",
+                      "type":  "@n8n/n8n-nodes-langchain.agent",
+                      "typeVersion":  3.1,
+                      "position":  [
+                                       -1184,
+                                       80
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "modelName":  "models/gemini-2.5-flash",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "1f839a0b-f356-4b75-a4ea-5617e4d67fbc",
+                      "name":  "Google Gemini Chat Model2",
+                      "type":  "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+                      "typeVersion":  1.2,
+                      "position":  [
+                                       -1296,
+                                       336
+                                   ],
+                      "credentials":  {
+                                          "googlePalmApi":  {
+                                                                "id":  null,
+                                                                "name":  "",
+                                                                "__aiGatewayManaged":  true
+                                                            }
+                                      }
+                  },
+                  {
+                      "parameters":  {
+                                         "schemaType":  "manual",
+                                         "inputSchema":  "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"decision\": {\n      \"type\": \"string\",\n      \"enum\": [\"BOOK\", \"CONSIDER\", \"WAIT\", \"MONITOR\", \"ALTERNATIVE\"]\n    },\n    \"confidence\": {\n      \"type\": \"string\",\n      \"enum\": [\"HIGH\", \"MEDIUM\", \"LOW\"]\n    },\n    \"reason\": {\n      \"type\": \"string\"\n    },\n    \"recommended_offer\": {\n      \"type\": [\"object\", \"null\"]\n    },\n    \"preferred_airline_status\": {\n      \"type\": \"string\"\n    },\n    \"budget_status\": {\n      \"type\": \"string\"\n    },\n    \"ml_status\": {\n      \"type\": \"string\"\n    },\n    \"next_action\": {\n      \"type\": \"string\"\n    }\n  },\n  \"required\": [\n    \"decision\",\n    \"confidence\",\n    \"reason\",\n    \"recommended_offer\",\n    \"preferred_airline_status\",\n    \"budget_status\",\n    \"ml_status\",\n    \"next_action\"\n  ]\n}"
+                                     },
+                      "id":  "f80069c4-c96a-4383-8b27-850d04db1bc5",
+                      "name":  "Structured Output Parser2",
+                      "type":  "@n8n/n8n-nodes-langchain.outputParserStructured",
+                      "typeVersion":  1.3,
+                      "position":  [
+                                       -928,
+                                       336
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "operation":  "upsert",
+                                         "dataTableId":  {
+                                                             "__rl":  true,
+                                                             "value":  "5XI0Nuxx36fobpoX",
+                                                             "mode":  "list",
+                                                             "cachedResultName":  "Flight Monitoring State",
+                                                             "cachedResultUrl":  "/projects/56kHyNYkNvLQsR6Q/datatables/5XI0Nuxx36fobpoX"
+                                                         },
+                                         "matchType":  "allConditions",
+                                         "filters":  {
+                                                         "conditions":  [
+                                                                            {
+                                                                                "keyName":  "monitor_id",
+                                                                                "keyValue":  "={{ $(\u0027Preference Agent\u0027).first().json.output.origin + \u0027_\u0027 + $(\u0027Preference Agent\u0027).first().json.output.destination + \u0027_\u0027 + $(\u0027Preference Agent\u0027).first().json.output.departure_date + \u0027_\u0027 + $(\u0027Preference Agent\u0027).first().json.output.passengers }}"
+                                                                            }
+                                                                        ]
+                                                     },
+                                         "columns":  {
+                                                         "mappingMode":  "defineBelow",
+                                                         "value":  {
+                                                                       "active":  true,
+                                                                       "monitor_id":  "={{ $(\u0027Preference Agent\u0027).first().json.output.origin + \u0027_\u0027 + $(\u0027Preference Agent\u0027).first().json.output.destination + \u0027_\u0027 + $(\u0027Preference Agent\u0027).first().json.output.departure_date + \u0027_\u0027 + $(\u0027Preference Agent\u0027).first().json.output.passengers }}",
+                                                                       "origin":  "={{ $(\u0027Preference Agent\u0027).first().json.output.origin }}",
+                                                                       "destination":  "={{ $(\u0027Preference Agent\u0027).first().json.output.destination }}",
+                                                                       "departure_date":  "={{ $(\u0027Preference Agent\u0027).first().json.output.departure_date }}",
+                                                                       "passengers":  "={{ $(\u0027Preference Agent\u0027).first().json.output.passengers }}",
+                                                                       "budget":  "={{ $(\u0027Preference Agent\u0027).first().json.output.budget }}",
+                                                                       "currency":  "={{ $(\u0027Preference Agent\u0027).first().json.output.currency }}",
+                                                                       "preffered_airline":  "={{ $(\u0027Preference Agent\u0027).first().json.output.airline_preference }}",
+                                                                       "last_fare":  "={{ $(\u0027Currency Normalization\u0027).first().json.currency_conversion.converted_fare }}",
+                                                                       "last_currency":  "={{ $(\u0027Currency Normalization\u0027).first().json.currency_conversion.target_currency }}",
+                                                                       "last_decision":  "={{ $(\u0027Decision Agent\u0027).first().json.output.decision }}",
+                                                                       "last_checked":  "={{ $now.toISO() }}"
+                                                                   },
+                                                         "matchingColumns":  [
+
+                                                                             ],
+                                                         "schema":  [
+                                                                        {
+                                                                            "id":  "monitor_id",
+                                                                            "displayName":  "monitor_id",
+                                                                            "required":  false,
+                                                                            "defaultMatch":  false,
+                                                                            "display":  true,
+                                                                            "type":  "string",
+                                                                            "readOnly":  false,
+                                                                            "removed":  false
+                                                                        },
+                                                                        {
+                                                                            "id":  "origin",
+                                                                            "displayName":  "origin",
+                                                                            "required":  false,
+                                                                            "defaultMatch":  false,
+                                                                            "display":  true,
+                                                                            "type":  "string",
+                                                                            "readOnly":  false,
+                                                                            "removed":  false
+                                                                        },
+                                                                        {
+                                                                            "id":  "destination",
+                                                                            "displayName":  "destination",
+                                                                            "required":  false,
+                                                                            "defaultMatch":  false,
+                                                                            "display":  true,
+                                                                            "type":  "string",
+                                                                            "readOnly":  false,
+                                                                            "removed":  false
+                                                                        },
+                                                                        {
+                                                                            "id":  "departure_date",
+                                                                            "displayName":  "departure_date",
+                                                                            "required":  false,
+                                                                            "defaultMatch":  false,
+                                                                            "display":  true,
+                                                                            "type":  "string",
+                                                                            "readOnly":  false,
+                                                                            "removed":  false
+                                                                        },
+                                                                        {
+                                                                            "id":  "passengers",
+                                                                            "displayName":  "passengers",
+                                                                            "required":  false,
+                                                                            "defaultMatch":  false,
+                                                                            "display":  true,
+                                                                            "type":  "number",
+                                                                            "readOnly":  false,
+                                                                            "removed":  false
+                                                                        },
+                                                                        {
+                                                                            "id":  "budget",
+                                                                            "displayName":  "budget",
+                                                                            "required":  false,
+                                                                            "defaultMatch":  false,
+                                                                            "display":  true,
+                                                                            "type":  "number",
+                                                                            "readOnly":  false,
+                                                                            "removed":  false
+                                                                        },
+                                                                        {
+                                                                            "id":  "currency",
+                                                                            "displayName":  "currency",
+                                                                            "required":  false,
+                                                                            "defaultMatch":  false,
+                                                                            "display":  true,
+                                                                            "type":  "string",
+                                                                            "readOnly":  false,
+                                                                            "removed":  false
+                                                                        },
+                                                                        {
+                                                                            "id":  "preffered_airline",
+                                                                            "displayName":  "preffered_airline",
+                                                                            "required":  false,
+                                                                            "defaultMatch":  false,
+                                                                            "display":  true,
+                                                                            "type":  "string",
+                                                                            "readOnly":  false,
+                                                                            "removed":  false
+                                                                        },
+                                                                        {
+                                                                            "id":  "last_fare",
+                                                                            "displayName":  "last_fare",
+                                                                            "required":  false,
+                                                                            "defaultMatch":  false,
+                                                                            "display":  true,
+                                                                            "type":  "number",
+                                                                            "readOnly":  false,
+                                                                            "removed":  false
+                                                                        },
+                                                                        {
+                                                                            "id":  "last_currency",
+                                                                            "displayName":  "last_currency",
+                                                                            "required":  false,
+                                                                            "defaultMatch":  false,
+                                                                            "display":  true,
+                                                                            "type":  "string",
+                                                                            "readOnly":  false,
+                                                                            "removed":  false
+                                                                        },
+                                                                        {
+                                                                            "id":  "last_decision",
+                                                                            "displayName":  "last_decision",
+                                                                            "required":  false,
+                                                                            "defaultMatch":  false,
+                                                                            "display":  true,
+                                                                            "type":  "string",
+                                                                            "readOnly":  false,
+                                                                            "removed":  false
+                                                                        },
+                                                                        {
+                                                                            "id":  "last_checked",
+                                                                            "displayName":  "last_checked",
+                                                                            "required":  false,
+                                                                            "defaultMatch":  false,
+                                                                            "display":  true,
+                                                                            "type":  "string",
+                                                                            "readOnly":  false,
+                                                                            "removed":  false
+                                                                        },
+                                                                        {
+                                                                            "id":  "active",
+                                                                            "displayName":  "active",
+                                                                            "required":  false,
+                                                                            "defaultMatch":  false,
+                                                                            "display":  true,
+                                                                            "type":  "boolean",
+                                                                            "readOnly":  false,
+                                                                            "removed":  false
+                                                                        },
+                                                                        {
+                                                                            "id":  "last_alert_signature",
+                                                                            "displayName":  "last_alert_signature",
+                                                                            "required":  false,
+                                                                            "defaultMatch":  false,
+                                                                            "display":  true,
+                                                                            "type":  "string",
+                                                                            "readOnly":  false,
+                                                                            "removed":  false
+                                                                        }
+                                                                    ],
+                                                         "attemptToConvertTypes":  false,
+                                                         "convertFieldsToString":  false
+                                                     },
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "3f476d1e-50e2-4978-b17f-d44082a0f702",
+                      "name":  "Save Monitoring State",
+                      "type":  "n8n-nodes-base.dataTable",
+                      "typeVersion":  1.1,
+                      "position":  [
+                                       -816,
+                                       80
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "jsCode":  "\nconst decisions = $(\u0027Monitoring Decision Agent\u0027).all();\nconst normalizations = $(\u0027Monitoring Currency Normalization\u0027).all();\nconst previousStates = $(\u0027Load Monitoring State\u0027).all();\n\nconst count = Math.min(\n  decisions.length,\n  normalizations.length,\n  previousStates.length\n);\n\nreturn Array.from({ length: count }, (_, i) =\u003e {\n  const decisionData =\n    decisions[i].json.output ?? decisions[i].json;\n\n  const normalization = normalizations[i].json;\n  const analysis = normalization.output ?? normalization;\n  const previousState = previousStates[i].json;\n\n  // Read events from the normalization output.\n  const events = Array.isArray(analysis.events)\n    ? analysis.events\n    : [];\n\n  // Read normalized offers when available.\n  const offers = Array.isArray(analysis.normalized_offers)\n    ? analysis.normalized_offers\n    : [];\n\n  // Avoid reporting NO_CURRENT_OFFERS when valid offers exist.\n  const currentEvent = events.length\n    ? events.join(\u0027,\u0027)\n    : offers.length \u003e 0\n      ? \u0027OFFERS_AVAILABLE\u0027\n      : \u0027NO_CURRENT_OFFERS\u0027;\n\n  // Find the cheapest offer within the budget.\n  const budgetOffers = offers.filter(\n    offer =\u003e offer.within_budget === true\n  );\n\n  budgetOffers.sort(\n    (a, b) =\u003e a.normalized_price - b.normalized_price\n  );\n\n  const cheapestOffer = budgetOffers[0];\n\n  // Use the actual normalized fare where available.\n  const currentFare =\n    cheapestOffer?.normalized_price ??\n    analysis.current_fare ??\n    analysis.cheapest_current_offer?.normalized_price ??\n    \u0027\u0027;\n\n  const currentCurrency =\n    cheapestOffer?.normalized_currency ??\n    analysis.current_currency ??\n    analysis.budget_currency ??\n    previousState.currency ??\n    \u0027INR\u0027;\n\n  const preferredAirline =\n    previousState.preffered_airline ??\n    previousState.preferred_airline ??\n    \u0027\u0027;\n\n  // Build a signature that represents the monitoring situation.\n  const currentSignature = [\n    currentEvent,\n    currentFare,\n    currentCurrency,\n    preferredAirline\n  ].join(\u0027|\u0027);\n\n  const previousSignature =\n    previousState.last_alert_signature ?? \u0027\u0027;\n\n  const signatureChanged =\n    currentSignature !== previousSignature;\n\n  // Only alert when the decision agent explicitly recommends ALERT\n  // and the monitoring signature has changed.\n  const shouldAlert =\n    decisionData.decision === \u0027ALERT\u0027 \u0026\u0026\n    signatureChanged;\n\n  return {\n    json: {\n      ...decisionData,\n      monitor_id: previousState.monitor_id,\n      monitoring_signature: currentSignature,\n      previous_monitoring_signature: previousSignature,\n      signature_changed: signatureChanged,\n      should_alert: shouldAlert\n    }\n  };\n});\n"
+                                     },
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       1296,
+                                       496
+                                   ],
+                      "id":  "e099886e-c1fb-4c23-81a8-bd2e3b958b7d",
+                      "name":  "Monitoring Alert Signature Check"
+                  },
+                  {
+                      "parameters":  {
+                                         "operation":  "upsert",
+                                         "dataTableId":  {
+                                                             "__rl":  true,
+                                                             "value":  "5XI0Nuxx36fobpoX",
+                                                             "mode":  "list",
+                                                             "cachedResultName":  "Flight Monitoring State",
+                                                             "cachedResultUrl":  "/projects/56kHyNYkNvLQsR6Q/datatables/5XI0Nuxx36fobpoX"
+                                                         },
+                                         "matchType":  "allConditions",
+                                         "filters":  {
+                                                         "conditions":  [
+                                                                            {
+                                                                                "keyName":  "monitor_id",
+                                                                                "keyValue":  "={{ $json.monitor_id }}"
+                                                                            }
+                                                                        ]
+                                                     },
+                                         "columns":  {
+                                                         "mappingMode":  "defineBelow",
+                                                         "value":  {
+                                                                       "active":  true,
+                                                                       "monitor_id":  "={{ $json.monitor_id }}",
+                                                                       "origin":  "={{ $(\u0027Load Monitoring State\u0027).all()[$itemIndex].json.origin }}",
+                                                                       "destination":  "={{ $(\u0027Load Monitoring State\u0027).all()[$itemIndex].json.destination }}",
+                                                                       "departure_date":  "={{ $(\u0027Load Monitoring State\u0027).all()[$itemIndex].json.departure_date }}",
+                                                                       "passengers":  "={{ $(\u0027Load Monitoring State\u0027).all()[$itemIndex].json.passengers }}",
+                                                                       "budget":  "={{ $(\u0027Load Monitoring State\u0027).all()[$itemIndex].json.budget }}",
+                                                                       "currency":  "={{ $(\u0027Load Monitoring State\u0027).all()[$itemIndex].json.currency }}",
+                                                                       "preferred_airline":  "={{ $(\u0027Load Monitoring State\u0027).all()[$itemIndex].json.preffered_airline ?? $(\u0027Load Monitoring State\u0027).all()[$itemIndex].json.preferred_airline ?? null }}",
+                                                                       "last_fare":  "={{ $(\u0027Monitoring Alert Signature Check\u0027).all()[$itemIndex].json.monitoring_signature.split(\u0027|\u0027)[1] || $(\u0027Load Monitoring State\u0027).all()[$itemIndex].json.last_fare }}",
+                                                                       "last_currency":  "={{ $(\u0027Monitoring Alert Signature Check\u0027).all()[$itemIndex].json.monitoring_signature.split(\u0027|\u0027)[2] || $(\u0027Load Monitoring State\u0027).all()[$itemIndex].json.last_currency || \u0027INR\u0027 }}",
+                                                                       "last_decision":  "={{ $(\u0027Monitoring Decision Agent\u0027).all()[$itemIndex].json.output.decision }}",
+                                                                       "last_checked":  "={{ $now.toISO() }}",
+                                                                       "last_alert_signature":  "={{ $json.monitoring_signature }}"
+                                                                   },
+                                                         "matchingColumns":  [
+
+                                                                             ],
+                                                         "schema":  [
+                                                                        {
+                                                                            "id":  "monitor_id",
+                                                                            "displayName":  "monitor_id",
+                                                                            "required":  false,
+                                                                            "defaultMatch":  false,
+                                                                            "display":  true,
+                                                                            "type":  "string",
+                                                                            "readOnly":  false,
+                                                                            "removed":  false
+                                                                        },
+                                                                        {
+                                                                            "id":  "origin",
+                                                                            "displayName":  "origin",
+                                                                            "required":  false,
+                                                                            "defaultMatch":  false,
+                                                                            "display":  true,
+                                                                            "type":  "string",
+                                                                            "readOnly":  false,
+                                                                            "removed":  false
+                                                                        },
+                                                                        {
+                                                                            "id":  "destination",
+                                                                            "displayName":  "destination",
+                                                                            "required":  false,
+                                                                            "defaultMatch":  false,
+                                                                            "display":  true,
+                                                                            "type":  "string",
+                                                                            "readOnly":  false,
+                                                                            "removed":  false
+                                                                        },
+                                                                        {
+                                                                            "id":  "departure_date",
+                                                                            "displayName":  "departure_date",
+                                                                            "required":  false,
+                                                                            "defaultMatch":  false,
+                                                                            "display":  true,
+                                                                            "type":  "string",
+                                                                            "readOnly":  false,
+                                                                            "removed":  false
+                                                                        },
+                                                                        {
+                                                                            "id":  "passengers",
+                                                                            "displayName":  "passengers",
+                                                                            "required":  false,
+                                                                            "defaultMatch":  false,
+                                                                            "display":  true,
+                                                                            "type":  "number",
+                                                                            "readOnly":  false,
+                                                                            "removed":  false
+                                                                        },
+                                                                        {
+                                                                            "id":  "budget",
+                                                                            "displayName":  "budget",
+                                                                            "required":  false,
+                                                                            "defaultMatch":  false,
+                                                                            "display":  true,
+                                                                            "type":  "number",
+                                                                            "readOnly":  false,
+                                                                            "removed":  false
+                                                                        },
+                                                                        {
+                                                                            "id":  "currency",
+                                                                            "displayName":  "currency",
+                                                                            "required":  false,
+                                                                            "defaultMatch":  false,
+                                                                            "display":  true,
+                                                                            "type":  "string",
+                                                                            "readOnly":  false,
+                                                                            "removed":  false
+                                                                        },
+                                                                        {
+                                                                            "id":  "preferred_airline",
+                                                                            "displayName":  "preferred_airline",
+                                                                            "required":  false,
+                                                                            "defaultMatch":  false,
+                                                                            "display":  true,
+                                                                            "type":  "string",
+                                                                            "readOnly":  false,
+                                                                            "removed":  false
+                                                                        },
+                                                                        {
+                                                                            "id":  "last_fare",
+                                                                            "displayName":  "last_fare",
+                                                                            "required":  false,
+                                                                            "defaultMatch":  false,
+                                                                            "display":  true,
+                                                                            "type":  "number",
+                                                                            "readOnly":  false,
+                                                                            "removed":  false
+                                                                        },
+                                                                        {
+                                                                            "id":  "last_currency",
+                                                                            "displayName":  "last_currency",
+                                                                            "required":  false,
+                                                                            "defaultMatch":  false,
+                                                                            "display":  true,
+                                                                            "type":  "string",
+                                                                            "readOnly":  false,
+                                                                            "removed":  false
+                                                                        },
+                                                                        {
+                                                                            "id":  "last_decision",
+                                                                            "displayName":  "last_decision",
+                                                                            "required":  false,
+                                                                            "defaultMatch":  false,
+                                                                            "display":  true,
+                                                                            "type":  "string",
+                                                                            "readOnly":  false,
+                                                                            "removed":  false
+                                                                        },
+                                                                        {
+                                                                            "id":  "last_checked",
+                                                                            "displayName":  "last_checked",
+                                                                            "required":  false,
+                                                                            "defaultMatch":  false,
+                                                                            "display":  true,
+                                                                            "type":  "string",
+                                                                            "readOnly":  false,
+                                                                            "removed":  false
+                                                                        },
+                                                                        {
+                                                                            "id":  "active",
+                                                                            "displayName":  "active",
+                                                                            "required":  false,
+                                                                            "defaultMatch":  false,
+                                                                            "display":  true,
+                                                                            "type":  "boolean",
+                                                                            "readOnly":  false,
+                                                                            "removed":  false
+                                                                        },
+                                                                        {
+                                                                            "id":  "last_alert_signature",
+                                                                            "displayName":  "last_alert_signature",
+                                                                            "required":  false,
+                                                                            "defaultMatch":  false,
+                                                                            "display":  true,
+                                                                            "type":  "string",
+                                                                            "readOnly":  false,
+                                                                            "removed":  false
+                                                                        }
+                                                                    ],
+                                                         "attemptToConvertTypes":  false,
+                                                         "convertFieldsToString":  false
+                                                     },
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.dataTable",
+                      "typeVersion":  1.1,
+                      "position":  [
+                                       1536,
+                                       640
+                                   ],
+                      "id":  "f57ab278-0fdb-4b56-a9ed-5e5a9b65fc5f",
+                      "name":  "Save Monitoring State - Monitoring"
+                  },
+                  {
+                      "parameters":  {
+                                         "promptType":  "define",
+                                         "text":  "=\n{{ JSON.stringify({\n  preferences: $(\u0027Preference Agent\u0027).first().json.output,\n  fare_intelligence: $(\u0027Fare Intelligence Agent\u0027).first().json.output,\n  fare_analysis: $(\u0027Fare Statistics \u0026 Budget Analysis\u0027).first().json,\n  ml_result: $(\u0027ML Result Handler\u0027).isExecuted\n    ? $(\u0027ML Result Handler\u0027).first().json\n    : $(\u0027ML Not Available\u0027).isExecuted\n      ? $(\u0027ML Not Available\u0027).first().json\n      : { prediction_available: false, reason: \"No ML result was produced.\" },\n  currency_normalization: $(\u0027Currency Normalization\u0027).first().json,\n  decision: $(\u0027Decision Agent\u0027).first().json.output\n}) }}\n",
+                                         "hasOutputParser":  true,
+                                         "options":  {
+                                                         "systemMessage":  "You are the Flight Intelligence Report Agent in an Agentic Flight Fare Intelligence and Budget Alert System.\n\nYour responsibility is to transform the completed flight-search analysis into a clear, professional, user-facing flight intelligence report.\n\nThe upstream system has already:\n- extracted the user\u0027s preferences,\n- searched for flights,\n- processed the available offers,\n- analyzed fares,\n- calculated fare statistics and budget information,\n- attempted ML reference-price prediction when route and airline coverage is available,\n- normalized currencies when required,\n- and produced a final decision.\n\nYou must NOT perform new calculations, currency conversions, flight searches, or predictions.\n\nUse only the information supplied in the input.\n\nYour report must clearly communicate:\n\n1. TRIP DETAILS\n- origin\n- destination\n- departure date\n- return date if available\n- passengers\n- cabin preference if available\n- preferred airline if available\n- budget and currency\n\n2. FLIGHT FINDINGS\n- relevant available flight options\n- recommended/current best option when available\n- airline\n- fare\n- currency\n- stops\n- duration\n- other important flight details when available\n\n3. FARE INTELLIGENCE\n- current fare information\n- fare statistics or comparisons when available\n- budget relationship when a valid currency comparison exists\n\n4. ML REFERENCE\n- predicted historical reference fare when available\n- clearly identify it as a historical reference estimate\n- never describe the prediction as a guaranteed future fare\n- if ML was unavailable for the route/airline, clearly state that ML reference pricing was unavailable\n\n5. CURRENCY\n- clearly state the currencies involved\n- use only upstream normalized values\n- never perform your own currency conversion\n- never make numerical comparisons between incompatible currencies\n\n6. FINAL DECISION\nClearly display the decision produced by the Decision Agent:\nBOOK, CONSIDER, WAIT, MONITOR, or ALTERNATIVE.\n\n7. REASONING\nExplain the main reasons behind the decision using the evidence supplied by the upstream system.\n\n8. RECOMMENDATION\nProvide the next action supplied by the Decision Agent.\n\nImportant rules:\n\n- Never invent flights, fares, airlines, availability, exchange rates, predictions, or travel information.\n- Never claim a booking has been made.\n- Never claim a fare will remain available.\n- Duffel Test Mode inventory is synthetic/test inventory and must not be presented as guaranteed real-world availability.\n- If the preferred airline is unavailable, state this clearly.\n- If an alternative airline is recommended, clearly identify it as an alternative.\n- If currency conversion is unavailable, explicitly state that numerical budget comparison could not be performed.\n- Preserve the actual decision and reasoning from the Decision Agent.\n- Do not expose internal n8n implementation details.\n- Do not mention node names, workflow names, prompts, APIs, credentials, or internal technical processing in the user-facing report.\n\nFormat the output as a professional email report.\n\nReturn only the structured output required by the connected Output Parser."
+                                                     }
+                                     },
+                      "type":  "@n8n/n8n-nodes-langchain.agent",
+                      "typeVersion":  3.1,
+                      "position":  [
+                                       -592,
+                                       80
+                                   ],
+                      "id":  "e428c052-f49e-4cfa-b1b1-d87a2ed15b4e",
+                      "name":  "Flight Intelligence Report Agent"
+                  },
+                  {
+                      "parameters":  {
+                                         "schemaType":  "manual",
+                                         "inputSchema":  "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"subject\": {\n      \"type\": \"string\"\n    },\n    \"summary\": {\n      \"type\": \"string\"\n    },\n    \"decision\": {\n      \"type\": \"string\",\n      \"enum\": [\n        \"BOOK\",\n        \"CONSIDER\",\n        \"WAIT\",\n        \"MONITOR\",\n        \"ALTERNATIVE\"\n      ]\n    },\n    \"reasoning\": {\n      \"type\": \"string\"\n    },\n    \"recommendation\": {\n      \"type\": \"string\"\n    },\n    \"email_html\": {\n      \"type\": \"string\"\n    }\n  },\n  \"required\": [\n    \"subject\",\n    \"summary\",\n    \"decision\",\n    \"reasoning\",\n    \"recommendation\",\n    \"email_html\"\n  ]\n}"
+                                     },
+                      "type":  "@n8n/n8n-nodes-langchain.outputParserStructured",
+                      "typeVersion":  1.3,
+                      "position":  [
+                                       -416,
+                                       288
+                                   ],
+                      "id":  "d93854b3-ba6b-4ede-a90d-f8bd4532fd20",
+                      "name":  "Structured Output Parser5"
+                  },
+                  {
+                      "parameters":  {
+                                         "modelName":  "models/gemini-2.5-flash",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "type":  "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+                      "typeVersion":  1.2,
+                      "position":  [
+                                       -672,
+                                       288
+                                   ],
+                      "id":  "7e2132fd-7102-4484-a72e-8ecee9df9da5",
+                      "name":  "Google Gemini Chat Model5",
+                      "credentials":  {
+                                          "googlePalmApi":  {
+                                                                "id":  null,
+                                                                "name":  "",
+                                                                "__aiGatewayManaged":  true
+                                                            }
+                                      }
+                  },
+                  {
+                      "parameters":  {
+                                         "conditions":  {
+                                                            "options":  {
+                                                                            "caseSensitive":  true,
+                                                                            "leftValue":  "",
+                                                                            "typeValidation":  "strict",
+                                                                            "version":  3
+                                                                        },
+                                                            "conditions":  [
+                                                                               {
+                                                                                   "id":  "5ce73d62-e013-4645-bd4e-f415deabd4f6",
+                                                                                   "leftValue":  "={{ !!$(\u0027Flight Intelligence Report Agent\u0027).first().json.output.email_html }}",
+                                                                                   "rightValue":  "",
+                                                                                   "operator":  {
+                                                                                                    "type":  "boolean",
+                                                                                                    "operation":  "true",
+                                                                                                    "singleValue":  true
+                                                                                                }
+                                                                               }
+                                                                           ],
+                                                            "combinator":  "and"
+                                                        },
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.if",
+                      "typeVersion":  2.3,
+                      "position":  [
+                                       -224,
+                                       80
+                                   ],
+                      "id":  "85f16ca5-3ac6-492d-8efd-8e47c7616ed3",
+                      "name":  "If2"
+                  },
+                  {
+                      "parameters":  {
+                                         "fromEmail":  "YOUR_SENDER_EMAIL@example.com",
+                                         "toEmail":  "YOUR_RECIPIENT_EMAIL@example.com",
+                                         "subject":  "={{ $(\u0027Flight Intelligence Report Agent\u0027).first().json.output.subject }}",
+                                         "html":  "={{ $(\u0027Flight Intelligence Report Agent\u0027).first().json.output.email_html }}",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.emailSend",
+                      "typeVersion":  2.1,
+                      "position":  [
+                                       0,
+                                       0
+                                   ],
+                      "id":  "512dc713-7d8b-4813-9b13-131cf4c31085",
+                      "name":  "Send an Email",
+                      "webhookId":  "487af86e-2d42-4e0c-9117-057dd721e7c7",
+                      "credentials":  {
+                                          "smtp":  {
+                                                       "id":  "1CRKTMwAKo7sBW9j",
+                                                       "name":  "SMTP account"
+                                                   }
+                                      }
+                  }
+              ],
+    "pinData":  {
+
+                },
+    "connections":  {
+                        "When chat message received":  {
+                                                           "main":  [
+                                                                        [
+                                                                            {
+                                                                                "node":  "Preference Agent",
+                                                                                "type":  "main",
+                                                                                "index":  0
+                                                                            }
+                                                                        ]
+                                                                    ]
+                                                       },
+                        "Preference Agent":  {
+                                                 "main":  [
+                                                              [
+                                                                  {
+                                                                      "node":  "Duffel - Flight Offers Search",
+                                                                      "type":  "main",
+                                                                      "index":  0
+                                                                  }
+                                                              ]
+                                                          ]
+                                             },
+                        "Google Gemini Chat Model":  {
+                                                         "ai_languageModel":  [
+                                                                                  [
+                                                                                      {
+                                                                                          "node":  "Preference Agent",
+                                                                                          "type":  "ai_languageModel",
+                                                                                          "index":  0
+                                                                                      }
+                                                                                  ]
+                                                                              ]
+                                                     },
+                        "Structured Output Parser":  {
+                                                         "ai_outputParser":  [
+                                                                                 [
+                                                                                     {
+                                                                                         "node":  "Preference Agent",
+                                                                                         "type":  "ai_outputParser",
+                                                                                         "index":  0
+                                                                                     }
+                                                                                 ]
+                                                                             ]
+                                                     },
+                        "Duffel - Flight Offers Search":  {
+                                                              "main":  [
+                                                                           [
+                                                                               {
+                                                                                   "node":  "Offer Processor \u0026 Test Data Filter",
+                                                                                   "type":  "main",
+                                                                                   "index":  0
+                                                                               }
+                                                                           ]
+                                                                       ]
+                                                          },
+                        "Offer Processor \u0026 Test Data Filter":  {
+                                                                        "main":  [
+                                                                                     [
+                                                                                         {
+                                                                                             "node":  "Prepare Fare Intelligence Input",
+                                                                                             "type":  "main",
+                                                                                             "index":  0
+                                                                                         }
+                                                                                     ]
+                                                                                 ]
+                                                                    },
+                        "Prepare Fare Intelligence Input":  {
+                                                                "main":  [
+                                                                             [
+                                                                                 {
+                                                                                     "node":  "Fare Intelligence Agent",
+                                                                                     "type":  "main",
+                                                                                     "index":  0
+                                                                                 }
+                                                                             ]
+                                                                         ]
+                                                            },
+                        "Fare Intelligence Agent":  {
+                                                        "main":  [
+                                                                     [
+                                                                         {
+                                                                             "node":  "Fare Statistics \u0026 Budget Analysis",
+                                                                             "type":  "main",
+                                                                             "index":  0
+                                                                         }
+                                                                     ]
+                                                                 ]
+                                                    },
+                        "Google Gemini Chat Model1":  {
+                                                          "ai_languageModel":  [
+                                                                                   [
+                                                                                       {
+                                                                                           "node":  "Fare Intelligence Agent",
+                                                                                           "type":  "ai_languageModel",
+                                                                                           "index":  0
+                                                                                       }
+                                                                                   ]
+                                                                               ]
+                                                      },
+                        "Structured Output Parser1":  {
+                                                          "ai_outputParser":  [
+                                                                                  [
+                                                                                      {
+                                                                                          "node":  "Fare Intelligence Agent",
+                                                                                          "type":  "ai_outputParser",
+                                                                                          "index":  0
+                                                                                      }
+                                                                                  ]
+                                                                              ]
+                                                      },
+                        "Fare Statistics \u0026 Budget Analysis":  {
+                                                                       "main":  [
+                                                                                    [
+                                                                                        {
+                                                                                            "node":  "ML Input Preparation",
+                                                                                            "type":  "main",
+                                                                                            "index":  0
+                                                                                        }
+                                                                                    ]
+                                                                                ]
+                                                                   },
+                        "ML Input Preparation":  {
+                                                     "main":  [
+                                                                  [
+                                                                      {
+                                                                          "node":  "ML Coverage Check",
+                                                                          "type":  "main",
+                                                                          "index":  0
+                                                                      }
+                                                                  ]
+                                                              ]
+                                                 },
+                        "ML Coverage Check":  {
+                                                  "main":  [
+                                                               [
+                                                                   {
+                                                                       "node":  "If",
+                                                                       "type":  "main",
+                                                                       "index":  0
+                                                                   }
+                                                               ]
+                                                           ]
+                                              },
+                        "If":  {
+                                   "main":  [
+                                                [
+                                                    {
+                                                        "node":  "ML Prediction",
+                                                        "type":  "main",
+                                                        "index":  0
+                                                    }
+                                                ],
+                                                [
+                                                    {
+                                                        "node":  "ML Not Available",
+                                                        "type":  "main",
+                                                        "index":  0
+                                                    }
+                                                ]
+                                            ]
+                               },
+                        "ML Prediction":  {
+                                              "main":  [
+                                                           [
+                                                               {
+                                                                   "node":  "ML Result Handler",
+                                                                   "type":  "main",
+                                                                   "index":  0
+                                                               }
+                                                           ]
+                                                       ]
+                                          },
+                        "ML Result Handler":  {
+                                                  "main":  [
+                                                               [
+                                                                   {
+                                                                       "node":  "Merge",
+                                                                       "type":  "main",
+                                                                       "index":  0
+                                                                   }
+                                                               ]
+                                                           ]
+                                              },
+                        "ML Not Available":  {
+                                                 "main":  [
+                                                              [
+                                                                  {
+                                                                      "node":  "Merge",
+                                                                      "type":  "main",
+                                                                      "index":  1
+                                                                  }
+                                                              ]
+                                                          ]
+                                             },
+                        "Monitoring Schedule":  {
+                                                    "main":  [
+                                                                 [
+                                                                     {
+                                                                         "node":  "Load Monitoring State",
+                                                                         "type":  "main",
+                                                                         "index":  0
+                                                                     }
+                                                                 ]
+                                                             ]
+                                                },
+                        "Load Monitoring State":  {
+                                                      "main":  [
+                                                                   [
+                                                                       {
+                                                                           "node":  "Monitoring Flight Search",
+                                                                           "type":  "main",
+                                                                           "index":  0
+                                                                       }
+                                                                   ]
+                                                               ]
+                                                  },
+                        "Monitoring Flight Search":  {
+                                                         "main":  [
+                                                                      [
+                                                                          {
+                                                                              "node":  "Monitoring Offer Processor",
+                                                                              "type":  "main",
+                                                                              "index":  0
+                                                                          }
+                                                                      ]
+                                                                  ]
+                                                     },
+                        "Monitoring Offer Processor":  {
+                                                           "main":  [
+                                                                        [
+                                                                            {
+                                                                                "node":  "Monitoring Analysis",
+                                                                                "type":  "main",
+                                                                                "index":  0
+                                                                            }
+                                                                        ]
+                                                                    ]
+                                                       },
+                        "Monitoring Analysis":  {
+                                                    "main":  [
+                                                                 [
+                                                                     {
+                                                                         "node":  "Monitoring Exchange Rate API",
+                                                                         "type":  "main",
+                                                                         "index":  0
+                                                                     }
+                                                                 ]
+                                                             ]
+                                                },
+                        "Monitoring Exchange Rate API":  {
+                                                             "main":  [
+                                                                          [
+                                                                              {
+                                                                                  "node":  "Monitoring Currency Normalization",
+                                                                                  "type":  "main",
+                                                                                  "index":  0
+                                                                              }
+                                                                          ]
+                                                                      ]
+                                                         },
+                        "Monitoring Currency Normalization":  {
+                                                                  "main":  [
+                                                                               [
+                                                                                   {
+                                                                                       "node":  "Monitoring Decision Agent",
+                                                                                       "type":  "main",
+                                                                                       "index":  0
+                                                                                   }
+                                                                               ]
+                                                                           ]
+                                                              },
+                        "Monitoring Decision Agent":  {
+                                                          "main":  [
+                                                                       [
+                                                                           {
+                                                                               "node":  "Monitoring Alert Signature Check",
+                                                                               "type":  "main",
+                                                                               "index":  0
+                                                                           }
+                                                                       ]
+                                                                   ]
+                                                      },
+                        "Google Gemini Chat Model3":  {
+                                                          "ai_languageModel":  [
+                                                                                   [
+                                                                                       {
+                                                                                           "node":  "Monitoring Decision Agent",
+                                                                                           "type":  "ai_languageModel",
+                                                                                           "index":  0
+                                                                                       }
+                                                                                   ]
+                                                                               ]
+                                                      },
+                        "Structured Output Parser3":  {
+                                                          "ai_outputParser":  [
+                                                                                  [
+                                                                                      {
+                                                                                          "node":  "Monitoring Decision Agent",
+                                                                                          "type":  "ai_outputParser",
+                                                                                          "index":  0
+                                                                                      }
+                                                                                  ]
+                                                                              ]
+                                                      },
+                        "Alerting Agent":  {
+                                               "main":  [
+                                                            [
+                                                                {
+                                                                    "node":  "If1",
+                                                                    "type":  "main",
+                                                                    "index":  0
+                                                                }
+                                                            ]
+                                                        ]
+                                           },
+                        "Google Gemini Chat Model4":  {
+                                                          "ai_languageModel":  [
+                                                                                   [
+                                                                                       {
+                                                                                           "node":  "Alerting Agent",
+                                                                                           "type":  "ai_languageModel",
+                                                                                           "index":  0
+                                                                                       }
+                                                                                   ]
+                                                                               ]
+                                                      },
+                        "Structured Output Parser4":  {
+                                                          "ai_outputParser":  [
+                                                                                  [
+                                                                                      {
+                                                                                          "node":  "Alerting Agent",
+                                                                                          "type":  "ai_outputParser",
+                                                                                          "index":  0
+                                                                                      }
+                                                                                  ]
+                                                                              ]
+                                                      },
+                        "If1":  {
+                                    "main":  [
+                                                 [
+                                                     {
+                                                         "node":  "Send Monitoring Alert",
+                                                         "type":  "main",
+                                                         "index":  0
+                                                     }
+                                                 ]
+                                             ]
+                                },
+                        "Merge":  {
+                                      "main":  [
+                                                   [
+                                                       {
+                                                           "node":  "Exchange Rate API",
+                                                           "type":  "main",
+                                                           "index":  0
+                                                       }
+                                                   ]
+                                               ]
+                                  },
+                        "Exchange Rate API":  {
+                                                  "main":  [
+                                                               [
+                                                                   {
+                                                                       "node":  "Currency Normalization",
+                                                                       "type":  "main",
+                                                                       "index":  0
+                                                                   }
+                                                               ]
+                                                           ]
+                                              },
+                        "Currency Normalization":  {
+                                                       "main":  [
+                                                                    [
+                                                                        {
+                                                                            "node":  "Decision Agent",
+                                                                            "type":  "main",
+                                                                            "index":  0
+                                                                        }
+                                                                    ]
+                                                                ]
+                                                   },
+                        "Decision Agent":  {
+                                               "main":  [
+                                                            [
+                                                                {
+                                                                    "node":  "Save Monitoring State",
+                                                                    "type":  "main",
+                                                                    "index":  0
+                                                                }
+                                                            ]
+                                                        ]
+                                           },
+                        "Google Gemini Chat Model2":  {
+                                                          "ai_languageModel":  [
+                                                                                   [
+                                                                                       {
+                                                                                           "node":  "Decision Agent",
+                                                                                           "type":  "ai_languageModel",
+                                                                                           "index":  0
+                                                                                       }
+                                                                                   ]
+                                                                               ]
+                                                      },
+                        "Structured Output Parser2":  {
+                                                          "ai_outputParser":  [
+                                                                                  [
+                                                                                      {
+                                                                                          "node":  "Decision Agent",
+                                                                                          "type":  "ai_outputParser",
+                                                                                          "index":  0
+                                                                                      }
+                                                                                  ]
+                                                                              ]
+                                                      },
+                        "Monitoring Alert Signature Check":  {
+                                                                 "main":  [
+                                                                              [
+                                                                                  {
+                                                                                      "node":  "Save Monitoring State - Monitoring",
+                                                                                      "type":  "main",
+                                                                                      "index":  0
+                                                                                  },
+                                                                                  {
+                                                                                      "node":  "Alerting Agent",
+                                                                                      "type":  "main",
+                                                                                      "index":  0
+                                                                                  }
+                                                                              ]
+                                                                          ]
+                                                             },
+                        "Save Monitoring State":  {
+                                                      "main":  [
+                                                                   [
+                                                                       {
+                                                                           "node":  "Flight Intelligence Report Agent",
+                                                                           "type":  "main",
+                                                                           "index":  0
+                                                                       }
+                                                                   ]
+                                                               ]
+                                                  },
+                        "Structured Output Parser5":  {
+                                                          "ai_outputParser":  [
+                                                                                  [
+                                                                                      {
+                                                                                          "node":  "Flight Intelligence Report Agent",
+                                                                                          "type":  "ai_outputParser",
+                                                                                          "index":  0
+                                                                                      }
+                                                                                  ]
+                                                                              ]
+                                                      },
+                        "Google Gemini Chat Model5":  {
+                                                          "ai_languageModel":  [
+                                                                                   [
+                                                                                       {
+                                                                                           "node":  "Flight Intelligence Report Agent",
+                                                                                           "type":  "ai_languageModel",
+                                                                                           "index":  0
+                                                                                       }
+                                                                                   ]
+                                                                               ]
+                                                      },
+                        "Flight Intelligence Report Agent":  {
+                                                                 "main":  [
+                                                                              [
+                                                                                  {
+                                                                                      "node":  "If2",
+                                                                                      "type":  "main",
+                                                                                      "index":  0
+                                                                                  }
+                                                                              ]
+                                                                          ]
+                                                             },
+                        "If2":  {
+                                    "main":  [
+                                                 [
+                                                     {
+                                                         "node":  "Send an Email",
+                                                         "type":  "main",
+                                                         "index":  0
+                                                     }
+                                                 ]
+                                             ]
+                                }
+                    },
+    "active":  false,
+    "settings":  {
+                     "executionOrder":  "v1",
+                     "binaryMode":  "separate"
+                 },
+    "versionId":  "7f024ff9-06ec-4fe2-9371-34ee5d47faa5",
+    "meta":  {
+                 "templateCredsSetupCompleted":  true,
+                 "instanceId":  "00b0a6dd268f359f4f0de8d1f8898281987e7d55980542ddce7b6d2147d4a742"
+             },
+    "nodeGroups":  [
+
+                   ],
+    "id":  "KYI029ofKtuXHHbr",
+    "tags":  [
+
+             ]
+}
